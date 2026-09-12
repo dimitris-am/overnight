@@ -82,7 +82,7 @@ The stop time is interpreted in local time; if it is earlier than the current ti
 
 ### 5.1 `CLAUDE.md` — "Unattended run" section
 
-`start` appends this section (or replaces a previous `overnight` section, delimited by `<!-- overnight:begin -->` / `<!-- overnight:end -->` markers). `{approved_actions}` is filled in; `{approved_actions}` lists the outside actions the brief's guardrails and constraints explicitly permit (e.g., deploying to Cloudflare, creating and pushing this project's GitHub repository).
+`start` appends this section (or replaces a previous `overnight` section, delimited by `<!-- overnight:begin -->` / `<!-- overnight:end -->` markers). `{approved_actions}` is filled in with the outside actions the brief's guardrails and constraints explicitly permit (e.g., deploying to Cloudflare, creating and pushing this project's GitHub repository).
 
 ```markdown
 <!-- overnight:begin -->
