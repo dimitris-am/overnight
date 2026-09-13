@@ -54,7 +54,8 @@ class FakeRunner:
             self.heads["head"] = f"commit-{len(self.calls)}"
         sid = step.get("session_id", f"s{len(self.calls)}")
         self.outcomes[sid] = ow.SessionOutcome(sid, step.get("met", False), step.get("reason"), step.get("text", ""))
-        return step.get("exit", 0), json.dumps({"session_id": sid}), "", step.get("killed", False)
+        stdout = step.get("stdout", json.dumps({"session_id": sid}))
+        return step.get("exit", 0), stdout, step.get("stderr", ""), step.get("killed", False)
 
 
 class WatchdogTestCase(unittest.TestCase):
@@ -75,7 +76,7 @@ class WatchdogTestCase(unittest.TestCase):
         config.update(overrides)
         (self.project / ".overnight" / "config.json").write_text(json.dumps(config))
 
-    def make(self, steps):
+    def make(self, steps, interpreter=None):
         runner = FakeRunner(self.clock, steps, self.heads)
         dog = ow.Watchdog(
             self.project,
@@ -83,7 +84,7 @@ class WatchdogTestCase(unittest.TestCase):
             runner=runner,
             clock=self.clock,
             sleeper=self.clock.sleep,
-            interpreter=lambda out, err: runner.outcomes[json.loads(out)["session_id"]],
+            interpreter=interpreter or (lambda out, err: runner.outcomes[json.loads(out)["session_id"]]),
             head=lambda project: self.heads["head"],
         )
         return dog, runner
@@ -107,6 +108,8 @@ class PureFunctionTests(unittest.TestCase):
         self.assertEqual(ow.usage_limit_wake("rate limit hit; resets at 23:30", START, settings), half_past_eleven + 120)
         noon_next = dt.datetime(2026, 9, 18, 12, 0).timestamp()
         self.assertEqual(ow.usage_limit_wake("limit reached, resets at 12pm", START, settings), noon_next + 120)
+        reset_epoch = int(START) + 5400
+        self.assertEqual(ow.usage_limit_wake(f"Claude AI usage limit reached|{reset_epoch}", START, settings), reset_epoch + 120)
 
     def test_goal_command_flags(self):
         self.assertEqual(
@@ -195,10 +198,16 @@ class TranscriptTests(unittest.TestCase):
 
     def test_interpret_session_reads_transcript(self):
         self.write_transcript("s3", [{"type": "attachment", "attachment": {"type": "goal_status", "met": True, "reason": "ok"}}])
-        outcome = ow.interpret_session(json.dumps({"session_id": "s3", "result": "done"}), "warn", self.config_dir)
+        outcome = ow.interpret_session(
+            json.dumps({"session_id": "s3", "result": "Implemented per-IP rate limiting", "is_error": False}), "warn", self.config_dir,
+        )
         self.assertEqual((outcome.session_id, outcome.met, outcome.reason), ("s3", True, "ok"))
-        self.assertIn("done", outcome.text)
+        self.assertNotIn("rate limiting", outcome.text)  # the model's normal final message is not limit evidence
         self.assertIn("warn", outcome.text)
+        error = ow.interpret_session(json.dumps({"session_id": "s3", "result": "Claude AI usage limit reached|1789999999", "is_error": True}), "", self.config_dir)
+        self.assertIn("usage limit reached|1789999999", error.text)
+        subtype = ow.interpret_session(json.dumps({"session_id": "s3", "subtype": "error_during_execution", "result": "boom"}), "", self.config_dir)
+        self.assertIn("boom", subtype.text)
 
     def test_interpret_session_handles_garbage(self):
         outcome = ow.interpret_session("Traceback: boom", "", self.config_dir)
@@ -251,6 +260,22 @@ class LoopTests(WatchdogTestCase):
         self.assertGreaterEqual(sum(self.clock.sleeps), 1800)
         self.assertEqual(self.state()["consecutive_fast_crashes"], 0)
         self.assertEqual(runner.calls[1][-2:], ["--resume", "s1"])
+
+    def test_normal_result_mentioning_rate_limiting_does_not_wait(self):
+        config_dir = Path(self.tmp.name).resolve() / "claude-config"
+        (config_dir / "projects" / "p").mkdir(parents=True)
+        (config_dir / "projects" / "p" / "s2.jsonl").write_text(
+            json.dumps({"type": "attachment", "attachment": {"type": "goal_status", "met": True, "reason": "all proven"}}) + "\n"
+        )
+        normal = {"type": "result", "subtype": "success", "is_error": False, "session_id": "s1", "result": "Implemented per-IP rate limiting."}
+        dog, runner = self.make(
+            [{"commit": True, "stdout": json.dumps(normal)}, {"stdout": json.dumps({"type": "result", "is_error": False, "session_id": "s2", "result": "done"})}],
+            interpreter=lambda out, err: ow.interpret_session(out, err, config_dir),
+        )
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(self.state()["status"], "done")
+        self.assertLess(sum(self.clock.sleeps), 1800)
+        self.assertEqual(self.clock.sleeps, [ow.Settings().relaunch_delay_seconds])
 
     def test_stop_time_ends_run_with_wrapup(self):
         self.clock.t = dt.datetime(2026, 9, 18, 7, 29).timestamp()

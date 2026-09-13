@@ -167,6 +167,8 @@ After the child exits, the watchdog reads `session_id` from the JSON result and 
 
 It also records the evaluator's latest `reason` in `state.json`.
 
+For usage-limit detection (section 7.3) the watchdog reads only error output: the JSON `result` when the result has `is_error: true` or a `subtype` starting with `error`, stderr always, and stdout when it is not JSON (a crash message). The model's normal final message is ignored, so a summary such as "Implemented per-IP rate limiting" never triggers a wait.
+
 ### 7.3 Loop rules
 
 | Situation | Action |
@@ -174,7 +176,7 @@ It also records the evaluator's latest `reason` in `state.json`.
 | Goal met | Set `done`, exit 0. No wrap-up needed. |
 | Not met, session ended | Relaunch with `--resume <last session-id>` after 10 s. After 2 consecutive resumes that end without a new commit, start a fresh session without `--resume`; files carry the state. |
 | Session ended within 60 s, three times in a row | Set `failed`, run wrap-up, exit 1. |
-| Result or stderr matches a usage-limit message | Sleep until the reset time if one is stated (plus 2 minutes), else 30 minutes, never past the stop time; does not count as a crash. |
+| Error output (section 7.2) matches a usage-limit message | Sleep until the reset time if one is stated (plus 2 minutes), else 30 minutes, never past the stop time; does not count as a crash. Claude Code's `usage limit reached\|<epoch>` form wakes at that epoch plus 2 minutes. |
 | Relaunch count exceeds the cap (default 10) | Set `failed`, run wrap-up, exit 1. |
 | Stop time reached or `.overnight/STOP` present | Terminate the child (SIGINT, then SIGTERM after 30 s), set `stopped`, run wrap-up, exit 0. |
 

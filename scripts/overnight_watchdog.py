@@ -31,6 +31,7 @@ PARENT_SESSION_ENV_VARS = frozenset({
 })
 LIMIT_RE = re.compile(r"(usage|rate)[ -]limit|limit (reached|resets)|hit your limit", re.IGNORECASE)
 RESET_RE = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
+LIMIT_EPOCH_RE = re.compile(r"limit reached\|(\d{9,11})", re.IGNORECASE)  # "Claude AI usage limit reached|<reset epoch>"
 WRAPUP_PROMPT = (
     "The unattended run has ended (reason: {reason}). Do not start new work. Rerun the checks for "
     "each numbered criterion in .overnight/goal.txt, update .overnight/evidence.md with the real "
@@ -91,6 +92,9 @@ def compute_deadline(stop_time: str, started_at: float) -> float:
 
 
 def usage_limit_wake(text: str, now: float, settings: Settings) -> Optional[float]:
+    epoch = LIMIT_EPOCH_RE.search(text)
+    if epoch:
+        return float(epoch.group(1)) + settings.limit_margin_seconds
     if not LIMIT_RE.search(text):
         return None
     match = RESET_RE.search(text)
@@ -138,14 +142,16 @@ def last_goal_status(transcript: Path) -> Tuple[bool, Optional[str]]:
 
 def interpret_session(stdout: str, stderr: str, config_dir: Path) -> SessionOutcome:
     session_id: Optional[str] = None
-    result_text = stdout
+    result_text = stdout  # not JSON: a crash message, worth checking for limits
     try:
         data = json.loads(stdout) if stdout.strip() else {}
-        if isinstance(data, dict):
-            session_id = data.get("session_id")
-            result_text = str(data.get("result") or "")
     except ValueError:
-        pass
+        data = None
+    if isinstance(data, dict):
+        session_id = data.get("session_id")
+        # The model's normal final message may say "rate limiting"; only an error result is limit evidence.
+        is_error = data.get("is_error") is True or str(data.get("subtype") or "").startswith("error")
+        result_text = str(data.get("result") or "") if is_error else ""
     met, reason = False, None
     if session_id:
         transcript = find_transcript(session_id, config_dir)
