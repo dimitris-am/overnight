@@ -54,7 +54,8 @@ Runs these steps in order and stops at the first failure with a specific message
 Prints, from `.overnight/state.json`, the transcripts, git, and tmux:
 - run status (`running`, `done`, `stopped`, `failed`), start time, stop time; while the status is `running`, if the recorded watchdog process is gone or its heartbeat (section 7.5) is more than 5 minutes old, the line reads `status: running — WATCHDOG NOT RESPONDING (last heartbeat HH:MM)`;
 - the tmux session: `alive`, `not running`, or `open; watchdog finished` when the run has ended (`done`, `stopped`, `failed`) but the session's shell is still open. Run health is judged from the status line, not from tmux, because the shell stays open after the watchdog exits;
-- the evaluator's latest verdict and reason;
+- the evaluator's latest verdict and reason, as recorded in `state.json` when a session ends;
+- while the status is `running`, the live view from the transcripts, because `state.json` does not change during a session (one session can last all night): the newest transcript under `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/*.jsonl` modified since `run_started_epoch` whose first 20 lines record `cwd` as the project path gives `live goal check: met|not met — <reason>` (or `none yet` before the evaluator's first verdict) and `current session started: HH:MM`. Only files modified since the run started are read;
 - relaunch count;
 - commits since start;
 - the last 15 lines of `JOURNAL.md`.

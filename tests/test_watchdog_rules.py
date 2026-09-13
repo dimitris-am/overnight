@@ -425,6 +425,48 @@ class StatusReportTests(unittest.TestCase):
         self.assertNotIn("NOT RESPONDING", report)
         self.assertIn("tmux session: overnight-proj (alive)", report)
 
+    def write_live_transcript(self, folder, sid, cwd, goal_statuses, mtime=None):
+        path = self.config_dir / "projects" / folder / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"type": "queue-operation", "sessionId": sid, "timestamp": "2026-09-17T20:05:00.123Z"},
+            {"type": "permission-mode", "sessionId": sid},
+            {"type": "user", "cwd": cwd, "sessionId": sid, "timestamp": "2026-09-17T20:05:01.000Z"},
+        ]
+        entries += [{"type": "attachment", "cwd": cwd, "attachment": dict(status, type="goal_status")} for status in goal_statuses]
+        path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def test_running_status_reports_the_live_transcript_verdict(self):
+        now = time.time()
+        self.write_state(watchdog_pid=os.getpid(), heartbeat_epoch=now, run_started_epoch=now - 3600)
+        project = str(self.project)
+        # an earlier run's transcript for this project, and a newer one for another project: both ignored
+        self.write_live_transcript("old", "old", project, [{"met": True, "reason": "old run"}], mtime=now - 7200)
+        self.write_live_transcript("live", "live", project, [{"met": False, "sentinel": True}, {"met": False, "reason": "evidence not printed"}], mtime=now - 60)
+        self.write_live_transcript("other", "other", "/somewhere/else", [{"met": True, "reason": "other project"}], mtime=now - 5)
+        report = self.report()
+        started = dt.datetime.fromisoformat("2026-09-17T20:05:00.123+00:00").astimezone()
+        self.assertIn("live goal check: not met — evidence not printed", report)
+        self.assertIn(f"current session started: {started:%H:%M}", report)
+        self.assertNotIn("old run", report)
+        self.assertNotIn("other project", report)
+
+    def test_live_transcript_without_a_verdict_yet(self):
+        now = time.time()
+        self.write_state(watchdog_pid=os.getpid(), heartbeat_epoch=now, run_started_epoch=now - 60)
+        self.write_live_transcript("live", "live", str(self.project), [{"met": False, "sentinel": True}])
+        report = self.report()
+        self.assertIn("live goal check: none yet", report)
+        self.assertIn("current session started:", report)
+
+    def test_no_live_lines_without_a_matching_transcript(self):
+        now = time.time()
+        self.write_state(watchdog_pid=os.getpid(), heartbeat_epoch=now, run_started_epoch=now - 60)
+        self.assertNotIn("live goal check", self.report())
+
     def test_finished_run_with_open_tmux_session(self):
         for status in ("done", "stopped", "failed"):
             self.write_state(status=status, watchdog_pid=os.getpid(), heartbeat_epoch=time.time() - 3600)

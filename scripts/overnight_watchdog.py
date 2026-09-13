@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import glob
+import itertools
 import json
 import os
 import re
@@ -125,19 +126,60 @@ def find_transcript(session_id: str, config_dir: Path) -> Optional[Path]:
     return Path(matches[0]) if matches else None
 
 
-def last_goal_status(transcript: Path) -> Tuple[bool, Optional[str]]:
-    met, reason = False, None
-    with transcript.open(encoding="utf-8") as handle:
+def latest_goal_status(transcript: Path) -> Optional[Dict]:
+    """The last goal_status attachment (possibly the sentinel written when the goal is set), or None."""
+    latest = None
+    with transcript.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
+            if "goal_status" not in line:
+                continue
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            attachment = entry.get("attachment") or {}
-            if attachment.get("type") == "goal_status":
-                met = bool(attachment.get("met"))
-                reason = attachment.get("reason")
-    return met, reason
+            attachment = entry.get("attachment") if isinstance(entry, dict) else None
+            if isinstance(attachment, dict) and attachment.get("type") == "goal_status":
+                latest = attachment
+    return latest
+
+
+def last_goal_status(transcript: Path) -> Tuple[bool, Optional[str]]:
+    latest = latest_goal_status(transcript) or {}
+    return bool(latest.get("met")), latest.get("reason")
+
+
+def transcript_head(transcript: Path, max_lines: int = 20) -> Tuple[Optional[str], Optional[str]]:
+    """The first `cwd` and first `timestamp` found in the transcript's first lines."""
+    cwd = timestamp = None
+    try:
+        with transcript.open(encoding="utf-8", errors="replace") as handle:
+            for line in itertools.islice(handle, max_lines):
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict):
+                    cwd = cwd or entry.get("cwd")
+                    timestamp = timestamp or entry.get("timestamp")
+    except OSError:
+        pass
+    return cwd, timestamp
+
+
+def find_live_transcript(project: Path, since: float, config_dir: Path) -> Optional[Path]:
+    """Newest transcript modified since the run started whose session ran in the project."""
+    recent = []
+    for name in glob.glob(str(config_dir / "projects" / "*" / "*.jsonl")):
+        try:
+            modified = os.path.getmtime(name)
+        except OSError:
+            continue
+        if modified >= since:
+            recent.append((modified, name))
+    for _, name in sorted(recent, reverse=True):
+        if transcript_head(Path(name))[0] == str(project):
+            return Path(name)
+    return None
 
 
 def interpret_session(stdout: str, stderr: str, config_dir: Path) -> SessionOutcome:
@@ -476,6 +518,21 @@ def watchdog_responding(state: Dict, now: float) -> bool:
     return now - float(heartbeat) <= STALE_HEARTBEAT_SECONDS
 
 
+def _verdict_text(verdict: Optional[Dict]) -> str:
+    if verdict is None:
+        return "none yet"
+    return ("met" if verdict.get("met") else "not met") + " — " + (verdict.get("reason") or "no reason given")[:300]
+
+
+def _session_start_text(transcript: Path) -> str:
+    timestamp = transcript_head(transcript)[1]
+    try:
+        started = dt.datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return "unknown"
+    return f"{started:%H:%M}"
+
+
 def status_report(
     project: Path,
     tmux_alive: Optional[Callable[[str], bool]] = None,
@@ -505,11 +562,6 @@ def status_report(
         tmux_text = "open; watchdog finished"
     else:
         tmux_text = "alive"
-    verdict = state.get("last_verdict")
-    if verdict is None:
-        verdict_text = "none yet"
-    else:
-        verdict_text = ("met" if verdict.get("met") else "not met") + " — " + (verdict.get("reason") or "no reason given")[:300]
     commits = subprocess.run(
         ["git", "rev-list", "--count", "HEAD", f"--since={config.get('started_at', '')}"],
         cwd=str(project), capture_output=True, text=True,
@@ -520,9 +572,16 @@ def status_report(
         f"started: {config.get('started_at', '?')}  stop time: {config.get('stop_time', '?')}",
         f"tmux session: {name} ({tmux_text})",
         f"sessions: {len(state.get('sessions', []))}  relaunches: {state.get('relaunches', 0)}",
-        f"last goal check: {verdict_text}",
-        f"commits since start: {commits}",
+        f"last goal check: {_verdict_text(state.get('last_verdict'))}",
     ]
+    # state.json changes only when a session ends; during a long session the transcript is the live view.
+    if status == "running" and state.get("run_started_epoch"):
+        live = find_live_transcript(project, float(state["run_started_epoch"]), config_dir or claude_config_dir())
+        if live is not None:
+            latest = latest_goal_status(live)
+            lines.append(f"live goal check: {_verdict_text(None if not latest or latest.get('sentinel') else latest)}")
+            lines.append(f"current session started: {_session_start_text(live)}")
+    lines.append(f"commits since start: {commits}")
     if state.get("end_reason"):
         lines.append(f"end reason: {state['end_reason']}")
     journal = project / "JOURNAL.md"
