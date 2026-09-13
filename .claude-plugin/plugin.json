@@ -1,0 +1,10 @@
+{
+  "name": "overnight",
+  "version": "0.1.0",
+  "description": "Run a Superpowers build unattended from a brief, on Claude Code's built-in /goal, with a watchdog that keeps the goal alive until it is met or the stop time arrives.",
+  "author": {
+    "name": "Dimitris Mitsis"
+  },
+  "license": "MIT",
+  "keywords": ["goal", "superpowers", "unattended", "overnight", "autonomous"]
+}

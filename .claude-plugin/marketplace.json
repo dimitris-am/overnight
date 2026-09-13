@@ -1,0 +1,19 @@
+{
+  "name": "overnight",
+  "owner": {
+    "name": "Dimitris Mitsis"
+  },
+  "description": "Unattended Superpowers runs on Claude Code's built-in /goal.",
+  "plugins": [
+    {
+      "name": "overnight",
+      "displayName": "overnight",
+      "source": "./",
+      "description": "Run a Superpowers build unattended from a brief, on the built-in /goal.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Dimitris Mitsis"
+      }
+    }
+  ]
+}
