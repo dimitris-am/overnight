@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -140,6 +141,17 @@ class PureFunctionTests(unittest.TestCase):
         cleaned = ow.clean_env(environ)
         self.assertEqual(cleaned, kept)
         self.assertIn("CLAUDECODE", environ)  # the input mapping is not modified
+
+    def test_watchdog_shell_command_with_and_without_caffeinate(self):
+        project = Path("/tmp/my proj")
+        script = str(Path(ow.__file__).resolve())
+        watchdog = f"{shlex.quote(sys.executable)} {shlex.quote(script)} run --project '/tmp/my proj' --claude-bin '/opt/claude bin/claude'"
+        plain = ow.watchdog_shell_command(project, "/opt/claude bin/claude", None)
+        self.assertTrue(plain.startswith(watchdog + "; "), plain)
+        self.assertNotIn("caffeinate", plain)
+        awake = ow.watchdog_shell_command(project, "/opt/claude bin/claude", "/usr/bin/caffeinate")
+        self.assertTrue(awake.startswith("/usr/bin/caffeinate -i " + watchdog + "; "), awake)
+        self.assertEqual(shlex.split(awake)[:4], ["/usr/bin/caffeinate", "-i", sys.executable, script])
 
     def test_tmux_env_args_never_forward_parent_session_vars(self):
         environ = {"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "secret", "FOO": "bar"}

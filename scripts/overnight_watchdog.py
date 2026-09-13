@@ -528,6 +528,19 @@ def claude_available(claude_bin: str) -> bool:
     return shutil.which(claude_bin) is not None
 
 
+def watchdog_shell_command(project: Path, claude_bin: str, caffeinate_path: Optional[str]) -> str:
+    """The POSIX sh command tmux runs: the watchdog (under `caffeinate -i` when available, so the
+    Mac stays awake through sessions and usage-limit waits), then a shell that keeps the pane open."""
+    script = Path(__file__).resolve()
+    watchdog = (
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} run "
+        f"--project {shlex.quote(str(project))} --claude-bin {shlex.quote(claude_bin)}"
+    )
+    if caffeinate_path:
+        watchdog = f"{shlex.quote(caffeinate_path)} -i {watchdog}"
+    return f"{watchdog}; echo '[overnight] watchdog exited'; exec \"${{SHELL:-/bin/sh}}\""
+
+
 def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
     project = Path(project).resolve()
     if shutil.which("tmux") is None:
@@ -539,12 +552,7 @@ def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
     name = session_name(project)
     if _tmux_alive(name):
         raise LaunchError(f"tmux session {name} already exists")
-    script = Path(__file__).resolve()
-    inner = (
-        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} run "
-        f"--project {shlex.quote(str(project))} --claude-bin {shlex.quote(claude_bin)}; "
-        "echo '[overnight] watchdog exited'; exec \"${SHELL:-/bin/sh}\""
-    )
+    inner = watchdog_shell_command(project, claude_bin, shutil.which("caffeinate"))
     cmd = ["tmux", "new-session", "-d", "-s", name, "-c", str(project)] + tmux_env_args(forward_env)
     cmd.append(inner)
     # A tmux server started by this call captures its environment: keep the parent session out of it.
