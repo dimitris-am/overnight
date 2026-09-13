@@ -17,9 +17,17 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 FAST_MODE_OFF = '{"fastMode": false}'
+# Identity of the Claude Code session that ran `launch`. Children must not inherit it, and
+# CLAUDE_CODE_MESSAGING_TOKEN is a secret that unattended commands could print into evidence.
+PARENT_SESSION_ENV_VARS = frozenset({
+    "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_EFFORT",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "AI_AGENT", "TRACEPARENT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_CLIENT_APP",
+})
 LIMIT_RE = re.compile(r"(usage|rate)[ -]limit|limit (reached|resets)|hit your limit", re.IGNORECASE)
 RESET_RE = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
 WRAPUP_PROMPT = (
@@ -51,6 +59,20 @@ class SessionOutcome:
     met: bool
     reason: Optional[str]
     text: str
+
+
+def clean_env(environ: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    source = os.environ if environ is None else environ
+    return {key: value for key, value in source.items() if key not in PARENT_SESSION_ENV_VARS}
+
+
+def tmux_env_args(forward_env: List[str], environ: Optional[Mapping[str, str]] = None) -> List[str]:
+    source = os.environ if environ is None else environ
+    args: List[str] = []
+    for var in forward_env:
+        if var in source and var not in PARENT_SESSION_ENV_VARS:
+            args += ["-e", f"{var}={source[var]}"]
+    return args
 
 
 def compute_deadline(stop_time: str, started_at: float) -> float:
@@ -336,14 +358,22 @@ def _terminate(proc: subprocess.Popen, kill_grace: float) -> None:
         pass
 
 
-def run_process(cmd, cwd, log_prefix, poll_seconds, should_stop, timeout, kill_grace):
+def run_process(
+    cmd: List[str],
+    cwd: Path,
+    log_prefix: Path,
+    poll_seconds: float,
+    should_stop: Callable[[], bool],
+    timeout: Optional[float],
+    kill_grace: float,
+) -> Tuple[int, str, str, bool]:
     log_prefix = Path(log_prefix)
     log_prefix.parent.mkdir(parents=True, exist_ok=True)
     out_path = log_prefix.parent / f"{log_prefix.name}.json"
     err_path = log_prefix.parent / f"{log_prefix.name}.stderr"
     killed = False
     with out_path.open("w", encoding="utf-8") as out, err_path.open("w", encoding="utf-8") as err:
-        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err, start_new_session=True)
+        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err, start_new_session=True, env=clean_env())
         started = time.time()
         while proc.poll() is None:
             if should_stop() or (timeout is not None and time.time() - started > timeout):
@@ -417,12 +447,10 @@ def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
         f"--project {shlex.quote(str(project))} --claude-bin {shlex.quote(claude_bin)}; "
         "echo '[overnight] watchdog exited'; exec \"${SHELL:-/bin/sh}\""
     )
-    cmd = ["tmux", "new-session", "-d", "-s", name, "-c", str(project)]
-    for var in forward_env:
-        if var in os.environ:
-            cmd += ["-e", f"{var}={os.environ[var]}"]
+    cmd = ["tmux", "new-session", "-d", "-s", name, "-c", str(project)] + tmux_env_args(forward_env)
     cmd.append(inner)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # A tmux server started by this call captures its environment: keep the parent session out of it.
+    result = subprocess.run(cmd, capture_output=True, text=True, env=clean_env())
     if result.returncode != 0:
         raise LaunchError(f"tmux failed: {result.stderr.strip()}")
     return name

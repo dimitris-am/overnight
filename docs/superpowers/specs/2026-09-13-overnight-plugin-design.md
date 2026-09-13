@@ -156,6 +156,8 @@ claude -p [--resume <session-id>] "/goal <contents of .overnight/goal.txt>"
 
 The watchdog runs it as a child process, polls every 15 seconds for `.overnight/STOP` and the stop time, and captures stdout (JSON result) and stderr to `.overnight/logs/session-<n>.json|.stderr`.
 
+**Environment.** Every session (and the tmux server `launch` may start) runs without the identity of the Claude Code session that ran `/overnight:start`: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_PID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `AI_AGENT`, `TRACEPARENT`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_AGENT_SDK_VERSION`, and `CLAUDE_AGENT_SDK_CLIENT_APP` are removed, and `launch` never forwards them into tmux, even when listed in `OVERNIGHT_FORWARD_ENV`. The messaging token is a secret that unattended commands could otherwise print into committed evidence. Everything else is kept (`PATH`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*`, proxy and CA variables).
+
 ### 7.2 Outcome detection
 
 After the child exits, the watchdog reads `session_id` from the JSON result and finds the transcript at `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/<session_id>.jsonl`. The **last** `goal_status` attachment decides:

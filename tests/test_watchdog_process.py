@@ -130,6 +130,25 @@ class RunProcessTests(unittest.TestCase):
             self.assertLess(time.time() - started, 10)
             self.assertTrue((Path(tmp) / "logs" / "slow.json").is_file())
 
+    def test_child_does_not_inherit_parent_session_env(self):
+        names = ("CLAUDECODE", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CONFIG_DIR")
+        saved = {name: os.environ.get(name) for name in names}
+        os.environ.update({"CLAUDECODE": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "secret-token", "CLAUDE_CONFIG_DIR": "/tmp/overnight-config"})
+        probe = f"import os; print(','.join(n for n in {names!r} if n in os.environ))"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code, out, err, killed = ow.run_process(
+                    [sys.executable, "-c", probe], Path(tmp), Path(tmp) / "logs" / "env", 0.05, lambda: False, 10.0, 1.0,
+                )
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "CLAUDE_CONFIG_DIR")
+
 
 class StatusTests(ProcessTestCase):
     def test_status_after_done_run(self):

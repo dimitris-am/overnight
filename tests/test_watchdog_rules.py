@@ -120,6 +120,28 @@ class PureFunctionTests(unittest.TestCase):
     def test_session_name_is_sanitized(self):
         self.assertEqual(ow.session_name(Path("/tmp/agna.skills v2")), "overnight-agna-skills-v2")
 
+    def test_clean_env_strips_parent_session_identity(self):
+        expected_names = {
+            "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_EFFORT",
+            "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID",
+            "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_BRIDGE_SESSION_ID",
+            "AI_AGENT", "TRACEPARENT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_CLIENT_APP",
+        }
+        self.assertEqual(set(ow.PARENT_SESSION_ENV_VARS), expected_names)
+        environ = {name: "inherited" for name in expected_names}
+        kept = {"PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": "/tmp/claude-config", "CLAUDE_CODE_USE_BEDROCK": "1"}
+        environ.update(kept)
+        cleaned = ow.clean_env(environ)
+        self.assertEqual(cleaned, kept)
+        self.assertIn("CLAUDECODE", environ)  # the input mapping is not modified
+
+    def test_tmux_env_args_never_forward_parent_session_vars(self):
+        environ = {"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "secret", "FOO": "bar"}
+        self.assertEqual(
+            ow.tmux_env_args(["PATH", "CLAUDECODE", "CLAUDE_CODE_MESSAGING_TOKEN", "FOO", "MISSING"], environ),
+            ["-e", "PATH=/bin", "-e", "FOO=bar"],
+        )
+
 
 class TranscriptTests(unittest.TestCase):
     def setUp(self):
