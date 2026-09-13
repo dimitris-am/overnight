@@ -21,7 +21,7 @@ SECTIONS = [
 LIST_KEYS = {"constraints", "must_have", "done_criteria", "guardrails"}
 
 HEADING_RE = re.compile(r"^#{2,3}\s+(.+?)\s*$")
-HEADING_SUFFIX_RE = re.compile(r"\s+[(—–]")
+HEADING_SUFFIX_RE = re.compile(r"\s+[(—–-]")
 ITEM_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(.+?)\s*$")
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
 STRICT_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")

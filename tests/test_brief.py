@@ -68,6 +68,13 @@ class ValidateBriefTests(unittest.TestCase):
         text = "## Mission\n\nx\n\n## Hard constraints\n\n- a\n\n## Must-have\n\n- b\n\n## Done-criteria\n\n- c\n\n## Guardrails\n\n- stop at 6:05\n"
         self.assertEqual(ob.validate(text).stop_time, "06:05")
 
+    def test_ascii_dash_heading_suffix(self):
+        text = "## Mission - v2\n\nx\n\n## Hard constraints\n\n- a\n\n## Must-have\n\n- b\n\n## Done-criteria - strict\n\n- c\n\n## Guardrails - nightly\n\n- stop at 05:00\n"
+        brief = ob.validate(text)
+        self.assertEqual(brief.errors, [])
+        self.assertEqual(brief.done_criteria, ["c"])
+        self.assertEqual(brief.stop_time, "05:00")
+
 
 class ValidateCliTests(unittest.TestCase):
     def run_cli(self, *args):
