@@ -22,6 +22,12 @@ class SkillFileTests(unittest.TestCase):
         for needle in ('overnight_brief.py" validate', 'overnight_prepare.py" --project', 'overnight_watchdog.py" launch', "references/goal-condition.md", "AskUserQuestion"):
             self.assertIn(needle, text)
 
+    def test_status_judges_attention_by_watchdog_health_not_tmux(self):
+        _, _, text = self.frontmatter("status")
+        self.assertIn("WATCHDOG NOT RESPONDING", text)
+        self.assertIn("`failed`", text)
+        self.assertNotIn("while the tmux session is not alive", text)
+
     def test_references_exist(self):
         for ref in ("brief-contract.md", "goal-condition.md", "unattended-rules.md"):
             self.assertTrue((ROOT / "skills" / "start" / "references" / ref).is_file(), ref)

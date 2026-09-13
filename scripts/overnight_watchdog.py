@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
@@ -37,6 +38,9 @@ WRAPUP_PROMPT = (
     "needs-human item, then commit."
 )
 
+STALE_HEARTBEAT_SECONDS = 300.0
+FINISHED_STATUSES = ("done", "stopped", "failed")
+
 Runner = Callable[[List[str], Path, Path, float, Callable[[], bool], Optional[float], float], Tuple[int, str, str, bool]]
 
 
@@ -51,6 +55,7 @@ class Settings:
     limit_margin_seconds: float = 120.0
     kill_grace_seconds: float = 30.0
     unproductive_resume_limit: int = 2
+    heartbeat_seconds: float = 60.0
 
 
 @dataclass
@@ -203,6 +208,9 @@ class Watchdog:
         self.deadline = compute_deadline(self.config["stop_time"], started)
         self.state: Dict = {
             "status": "running",
+            "watchdog_pid": os.getpid(),
+            "run_started_epoch": None,
+            "heartbeat_epoch": None,
             "started_at_epoch": started,
             "deadline_epoch": self.deadline,
             "relaunches": 0,
@@ -224,8 +232,15 @@ class Watchdog:
         return None
 
     def run(self) -> int:
-        self.logs.mkdir(parents=True, exist_ok=True)
-        self._save()
+        try:
+            self.state["run_started_epoch"] = self.clock()
+            self.logs.mkdir(parents=True, exist_ok=True)
+            self._save()
+            return self._loop()
+        except Exception as error:  # a crashed watchdog must not look like a running one
+            return self._crash(error)
+
+    def _loop(self) -> int:
         number = 0
         while True:
             reason = self.stop_reason()
@@ -242,7 +257,7 @@ class Watchdog:
                 self.project,
                 self.logs / f"session-{number}",
                 self.settings.poll_seconds,
-                lambda: self.stop_reason() is not None,
+                self._session_should_stop,
                 None,
                 self.settings.kill_grace_seconds,
             )
@@ -290,8 +305,22 @@ class Watchdog:
             self._save()
             self.sleeper(self.settings.relaunch_delay_seconds)
 
+    def _session_should_stop(self) -> bool:
+        self._heartbeat()
+        return self.stop_reason() is not None
+
+    def _wrapup_should_stop(self) -> bool:
+        self._heartbeat()
+        return False
+
+    def _heartbeat(self) -> None:
+        last = self.state.get("heartbeat_epoch")
+        if last is None or self.clock() - float(last) >= self.settings.heartbeat_seconds:
+            self._save()
+
     def _sleep_until(self, wake: float) -> None:
         while self.clock() < wake and self.stop_reason() is None:
+            self._heartbeat()
             self.sleeper(min(self.settings.poll_seconds, max(wake - self.clock(), 0.0)))
 
     def _record(self, number: int, outcome: SessionOutcome, exit_code: int, duration: float, made_commit: bool, resume_id: Optional[str]) -> None:
@@ -313,21 +342,43 @@ class Watchdog:
     def _end(self, status: str, reason: str, wrapup: bool, code: int) -> int:
         self._log(f"run {status}: {reason}")
         if wrapup:
-            self._log("wrap-up session starting")
-            self.runner(
-                wrapup_command(self.claude_bin, reason, self.config.get("model")),
-                self.project,
-                self.logs / "wrapup",
-                self.settings.poll_seconds,
-                lambda: False,
-                self.settings.wrapup_timeout_seconds,
-                self.settings.kill_grace_seconds,
-            )
+            self._run_wrapup(reason)
         self.state.update({"status": status, "end_reason": reason, "ended_at_epoch": self.clock()})
         self._save()
         return code
 
+    def _run_wrapup(self, reason: str) -> None:
+        self._log("wrap-up session starting")
+        self.runner(
+            wrapup_command(self.claude_bin, reason, self.config.get("model")),
+            self.project,
+            self.logs / "wrapup",
+            self.settings.poll_seconds,
+            self._wrapup_should_stop,
+            self.settings.wrapup_timeout_seconds,
+            self.settings.kill_grace_seconds,
+        )
+
+    def _crash(self, error: Exception) -> int:
+        reason = f"watchdog crashed: {type(error).__name__}: {error}"
+        trace = "".join(traceback.format_exception(type(error), error, error.__traceback__)).rstrip()
+        self.state.update({"status": "failed", "end_reason": reason, "ended_at_epoch": self.clock()})
+        try:
+            self._log(f"{reason}\n{trace}")
+            self._save()
+        except Exception:
+            traceback.print_exc()
+        try:
+            self._run_wrapup(reason)
+        except Exception:
+            try:
+                self._log("wrap-up failed:\n" + traceback.format_exc().rstrip())
+            except Exception:
+                traceback.print_exc()
+        return 1
+
     def _save(self) -> None:
+        self.state["heartbeat_epoch"] = self.clock()
         self.dir.mkdir(parents=True, exist_ok=True)
         tmp = self.dir / "state.json.tmp"
         tmp.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
@@ -382,7 +433,9 @@ def run_process(
                 break
             time.sleep(poll_seconds)
         exit_code = proc.wait()
-    return exit_code, out_path.read_text(encoding="utf-8"), err_path.read_text(encoding="utf-8"), killed
+    stdout = out_path.read_text(encoding="utf-8", errors="replace")
+    stderr = err_path.read_text(encoding="utf-8", errors="replace")
+    return exit_code, stdout, stderr, killed
 
 
 def _tmux_alive(name: str) -> bool:
@@ -391,8 +444,32 @@ def _tmux_alive(name: str) -> bool:
     return subprocess.run(["tmux", "has-session", "-t", f"={name}"], capture_output=True).returncode == 0
 
 
-def status_report(project: Path) -> str:
+def _pid_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def watchdog_responding(state: Dict, now: float) -> bool:
+    heartbeat = state.get("heartbeat_epoch")
+    if heartbeat is None or not _pid_alive(state.get("watchdog_pid")):
+        return False
+    return now - float(heartbeat) <= STALE_HEARTBEAT_SECONDS
+
+
+def status_report(
+    project: Path,
+    tmux_alive: Optional[Callable[[str], bool]] = None,
+    config_dir: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> str:
     project = Path(project).resolve()
+    tmux_alive = tmux_alive or _tmux_alive
+    now = time.time() if now is None else now
     overnight = project / ".overnight"
     config_file = overnight / "config.json"
     if not config_file.exists():
@@ -401,6 +478,18 @@ def status_report(project: Path) -> str:
     state_file = overnight / "state.json"
     state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
     name = session_name(project)
+    status = state.get("status", "not started")
+    status_text = status
+    if status == "running" and not watchdog_responding(state, now):
+        heartbeat = state.get("heartbeat_epoch")
+        last = f"{dt.datetime.fromtimestamp(float(heartbeat)):%H:%M}" if heartbeat is not None else "unknown"
+        status_text = f"running — WATCHDOG NOT RESPONDING (last heartbeat {last})"
+    if not tmux_alive(name):
+        tmux_text = "not running"
+    elif status in FINISHED_STATUSES:
+        tmux_text = "open; watchdog finished"
+    else:
+        tmux_text = "alive"
     verdict = state.get("last_verdict")
     if verdict is None:
         verdict_text = "none yet"
@@ -412,9 +501,9 @@ def status_report(project: Path) -> str:
     ).stdout.strip() or "0"
     lines = [
         f"overnight run: {project.name}",
-        f"status: {state.get('status', 'not started')}",
+        f"status: {status_text}",
         f"started: {config.get('started_at', '?')}  stop time: {config.get('stop_time', '?')}",
-        f"tmux session: {name} ({'alive' if _tmux_alive(name) else 'not running'})",
+        f"tmux session: {name} ({tmux_text})",
         f"sessions: {len(state.get('sessions', []))}  relaunches: {state.get('relaunches', 0)}",
         f"last goal check: {verdict_text}",
         f"commits since start: {commits}",
@@ -432,12 +521,21 @@ class LaunchError(Exception):
     pass
 
 
+def claude_available(claude_bin: str) -> bool:
+    if os.sep in claude_bin or (os.altsep and os.altsep in claude_bin):
+        path = os.path.expanduser(claude_bin)
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    return shutil.which(claude_bin) is not None
+
+
 def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
     project = Path(project).resolve()
     if shutil.which("tmux") is None:
         raise LaunchError("tmux is not installed")
     if not (project / ".overnight" / "config.json").exists():
         raise LaunchError(f"No overnight run prepared in {project}; run /overnight:start first")
+    if not claude_available(claude_bin):
+        raise LaunchError(f"claude binary not found: {claude_bin}")
     name = session_name(project)
     if _tmux_alive(name):
         raise LaunchError(f"tmux session {name} already exists")

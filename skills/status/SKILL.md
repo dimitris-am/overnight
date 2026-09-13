@@ -7,4 +7,4 @@ description: Show the status of the unattended overnight run in the current proj
 
 `SCRIPTS` is `<this skill's base directory>/../../scripts`.
 
-Run `python3 "$SCRIPTS/overnight_watchdog.py" status --project "$PWD"` and show its output as-is in a code block. Then add one or two plain sentences: whether the run is still going (tmux session alive and status `running`), finished (`done`), or needs attention (`failed`, or `running` while the tmux session is not alive). Do not start, stop, or change anything.
+Run `python3 "$SCRIPTS/overnight_watchdog.py" status --project "$PWD"` and show its output as-is in a code block. Then add one or two plain sentences: whether the run is still going (status `running` with no `WATCHDOG NOT RESPONDING` on the status line), finished (`done`, or `stopped` at the stop time or on request), or needs attention (`failed`, or a status line that says `WATCHDOG NOT RESPONDING`). Do not judge the run by the tmux session: it stays open after the watchdog finishes. Do not start, stop, or change anything.

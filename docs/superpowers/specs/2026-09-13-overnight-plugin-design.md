@@ -44,15 +44,15 @@ Runs these steps in order and stops at the first failure with a specific message
 3. **Review done-criteria for provability** (section 6.2). Where a criterion cannot be proven by command output in the transcript, propose an agent-provable rewording and ask the human to accept or edit it. This is the only interactive step, and it happens before launch.
 4. **Prepare the project** (section 5): write the unattended rules into `CLAUDE.md`, create `JOURNAL.md` and `.overnight/`, commit.
 5. **Write the goal condition** to `.overnight/goal.txt` (section 6).
-6. **Launch the watchdog** in a detached tmux session named `overnight-<directory-name>`, then print: the tmux attach command, `/overnight:status`, `/overnight:stop`, and the stop time.
+6. **Launch the watchdog** in a detached tmux session named `overnight-<directory-name>`, then print: the tmux attach command, `/overnight:status`, `/overnight:stop`, and the stop time. Before starting tmux, `launch` checks that the Claude binary exists (on `PATH`, or executable when given as a path) and fails with `claude binary not found: …` otherwise.
 
 `--model` defaults to the user's configured model. Fast mode is always forced off for the run.
 
 ### 3.2 `/overnight:status`
 
 Prints, from `.overnight/state.json`, the transcripts, git, and tmux:
-- run status (`running`, `done`, `stopped`, `failed`), start time, stop time;
-- whether the tmux session is alive;
+- run status (`running`, `done`, `stopped`, `failed`), start time, stop time; while the status is `running`, if the recorded watchdog process is gone or its heartbeat (section 7.5) is more than 5 minutes old, the line reads `status: running — WATCHDOG NOT RESPONDING (last heartbeat HH:MM)`;
+- the tmux session: `alive`, `not running`, or `open; watchdog finished` when the run has ended (`done`, `stopped`, `failed`) but the session's shell is still open. Run health is judged from the status line, not from tmux, because the shell stays open after the watchdog exits;
 - the evaluator's latest verdict and reason;
 - relaunch count;
 - commits since start;
@@ -182,6 +182,12 @@ It also records the evaluator's latest `reason` in `state.json`.
 A **fresh** session (no `--resume`, so no goal is attached and the evaluator cannot push it back into work), time-boxed to 15 minutes:
 
 > The unattended run has ended (reason: {stop time | stop requested | failed}). Do not start new work. Rerun the checks for each numbered criterion in .overnight/goal.txt, update .overnight/evidence.md with the real current results, append a final JOURNAL.md entry listing what is done, what is not, and every needs-human item, then commit.
+
+### 7.5 Health and crashes
+
+- `state.json` records `watchdog_pid`, `run_started_epoch` (when `run` began), and `heartbeat_epoch`. The heartbeat is refreshed on every state save, and at most every 60 seconds while a session, a usage-limit wait, or the wrap-up is in progress. `status` uses the pid and heartbeat to detect a watchdog that died while the status still says `running`.
+- Session output is read as UTF-8 with invalid bytes replaced, so unusual output cannot crash the watchdog.
+- Any unexpected exception in the loop is logged with its traceback to `.overnight/logs/watchdog.log`, sets `failed` with `end_reason: "watchdog crashed: <ExceptionType>: <message>"`, attempts the wrap-up (a failing wrap-up is logged, never raised), and exits 1.
 
 ## 8. Packaging
 

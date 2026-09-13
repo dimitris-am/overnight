@@ -1,6 +1,10 @@
 import datetime as dt
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -42,6 +46,8 @@ class FakeRunner:
             return 0, "{}", "", False
         self.calls.append(cmd)
         step = self.steps.pop(0)
+        if "raise" in step:
+            raise step["raise"]
         self.clock.t += step.get("duration", 300)
         if step.get("commit"):
             self.heads["head"] = f"commit-{len(self.calls)}"
@@ -251,6 +257,119 @@ class LoopTests(WatchdogTestCase):
         self.assertEqual(state["last_verdict"], {"met": True, "reason": "all proven"})
         self.assertEqual([s["reason"] for s in state["sessions"]], ["tests not shown", "all proven"])
         self.assertTrue(state["sessions"][0]["made_commit"])
+
+
+class CrashAndHeartbeatTests(WatchdogTestCase):
+    def watchdog_log(self):
+        return (self.project / ".overnight" / "logs" / "watchdog.log").read_text()
+
+    def test_runner_exception_fails_the_run_and_attempts_wrapup(self):
+        dog, runner = self.make([{"raise": RuntimeError("boom")}])
+        self.assertEqual(dog.run(), 1)
+        state = self.state()
+        self.assertEqual(state["status"], "failed")
+        self.assertTrue(state["end_reason"].startswith("watchdog crashed:"), state["end_reason"])
+        self.assertIn("RuntimeError: boom", state["end_reason"])
+        self.assertEqual(len(runner.wrapups), 1)
+        self.assertIn("Traceback", self.watchdog_log())
+
+    def test_crash_survives_a_wrapup_that_raises_too(self):
+        def runner(*args):
+            raise FileNotFoundError("no such file: claude")
+
+        dog = ow.Watchdog(self.project, runner=runner, clock=self.clock, sleeper=self.clock.sleep, head=lambda project: "x")
+        self.assertEqual(dog.run(), 1)
+        self.assertEqual(self.state()["status"], "failed")
+        self.assertIn("FileNotFoundError", self.state()["end_reason"])
+        self.assertIn("wrap-up failed", self.watchdog_log())
+
+    def test_state_records_pid_run_start_and_heartbeat(self):
+        seen = {}
+
+        def runner(cmd, cwd, log_prefix, poll, should_stop, timeout, grace):
+            if not cmd[cmd.index("-p") + 1].startswith("/goal "):
+                return 0, "{}", "", False
+            seen["first"] = self.state()
+            self.clock.t += 30
+            self.assertFalse(should_stop())
+            seen["after_30s"] = self.state()["heartbeat_epoch"]
+            self.clock.t += 60
+            self.assertFalse(should_stop())
+            seen["after_90s"] = self.state()["heartbeat_epoch"]
+            return 0, json.dumps({"session_id": "s1"}), "", False
+
+        dog = ow.Watchdog(
+            self.project, runner=runner, clock=self.clock, sleeper=self.clock.sleep, head=lambda project: "x",
+            interpreter=lambda out, err: ow.SessionOutcome("s1", True, "ok", ""),
+        )
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(seen["first"]["watchdog_pid"], os.getpid())
+        self.assertEqual(seen["first"]["run_started_epoch"], START)
+        self.assertEqual(seen["first"]["heartbeat_epoch"], START)
+        self.assertEqual(seen["after_30s"], START)  # at most one refresh every 60 s
+        self.assertEqual(seen["after_90s"], START + 90)
+
+    def test_heartbeat_continues_during_a_usage_limit_wait(self):
+        dog, runner = self.make([{"duration": 5, "text": "Claude usage limit reached."}, {"met": True}])
+        beats = []
+
+        def sleeper(seconds):
+            self.clock.sleep(seconds)
+            beats.append(self.state()["heartbeat_epoch"])
+
+        dog.sleeper = sleeper
+        self.assertEqual(dog.run(), 0)
+        self.assertGreaterEqual(max(beats), START + 1500)
+
+
+class StatusReportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self.tmp.name).resolve() / "proj"
+        (self.project / ".overnight").mkdir(parents=True)
+        (self.project / ".overnight" / "config.json").write_text(json.dumps({"stop_time": "07:30", "started_at": "2026-09-17T22:00:00"}))
+        self.config_dir = Path(self.tmp.name).resolve() / "claude-config"
+        (self.config_dir / "projects").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_state(self, **fields):
+        state = {"status": "running", "sessions": [], "relaunches": 0, "last_verdict": None}
+        state.update(fields)
+        (self.project / ".overnight" / "state.json").write_text(json.dumps(state))
+
+    def report(self, tmux_alive=True):
+        return ow.status_report(self.project, tmux_alive=lambda name: tmux_alive, config_dir=self.config_dir)
+
+    def test_running_with_a_dead_watchdog_pid_is_not_responding(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        heartbeat = time.time() - 30
+        self.write_state(watchdog_pid=child.pid, heartbeat_epoch=heartbeat, run_started_epoch=heartbeat)
+        report = self.report()
+        self.assertIn(f"status: running — WATCHDOG NOT RESPONDING (last heartbeat {dt.datetime.fromtimestamp(heartbeat):%H:%M})", report)
+
+    def test_running_with_a_stale_heartbeat_is_not_responding(self):
+        heartbeat = time.time() - 600
+        self.write_state(watchdog_pid=os.getpid(), heartbeat_epoch=heartbeat, run_started_epoch=heartbeat)
+        self.assertIn("WATCHDOG NOT RESPONDING", self.report())
+
+    def test_running_and_healthy(self):
+        now = time.time()
+        self.write_state(watchdog_pid=os.getpid(), heartbeat_epoch=now, run_started_epoch=now)
+        report = self.report()
+        self.assertIn("status: running\n", report)
+        self.assertNotIn("NOT RESPONDING", report)
+        self.assertIn("tmux session: overnight-proj (alive)", report)
+
+    def test_finished_run_with_open_tmux_session(self):
+        for status in ("done", "stopped", "failed"):
+            self.write_state(status=status, watchdog_pid=os.getpid(), heartbeat_epoch=time.time() - 3600)
+            report = self.report(tmux_alive=True)
+            self.assertIn("tmux session: overnight-proj (open; watchdog finished)", report)
+            self.assertNotIn("NOT RESPONDING", report)
+        self.assertIn("tmux session: overnight-proj (not running)", self.report(tmux_alive=False))
 
 
 if __name__ == "__main__":

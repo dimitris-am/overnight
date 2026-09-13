@@ -130,6 +130,17 @@ class RunProcessTests(unittest.TestCase):
             self.assertLess(time.time() - started, 10)
             self.assertTrue((Path(tmp) / "logs" / "slow.json").is_file())
 
+    def test_invalid_utf8_output_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err, killed = ow.run_process(
+                [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'out \\xff'); sys.stderr.buffer.write(b'bad \\xfe\\xff bytes')"],
+                Path(tmp), Path(tmp) / "logs" / "bytes", 0.05, lambda: False, 10.0, 1.0,
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("bad", err)
+        self.assertIn("�", err)
+        self.assertIn("out", out)
+
     def test_child_does_not_inherit_parent_session_env(self):
         names = ("CLAUDECODE", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CONFIG_DIR")
         saved = {name: os.environ.get(name) for name in names}
@@ -191,6 +202,20 @@ class LaunchTests(ProcessTestCase):
             self.assertIn("already exists", again.stdout + again.stderr)
         finally:
             subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+
+    def test_launch_refuses_a_missing_or_non_executable_claude_binary(self):
+        not_executable = self.project.parent / "claude-not-executable"
+        not_executable.write_text("#!/bin/sh\n")
+        not_executable.chmod(0o644)
+        name = ow.session_name(self.project)
+        try:
+            for claude_bin in (str(not_executable), "overnight-no-such-claude-binary"):
+                result = self.watchdog("launch", "--project", str(self.project), "--claude-bin", claude_bin)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("claude binary not found", result.stdout)
+                self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", f"={name}"], capture_output=True).returncode, 0)
+        finally:
+            subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
 
 
 if __name__ == "__main__":
