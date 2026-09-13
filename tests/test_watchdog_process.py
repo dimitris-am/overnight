@@ -99,6 +99,37 @@ class RunCommandTests(ProcessTestCase):
         self.assertEqual(len(calls), 2)
         self.assertFalse(calls[1][1].startswith("/goal"))
 
+    def test_stop_escalates_to_sigterm_when_session_ignores_sigint(self):
+        self.set_scenario([{"sleep": 60, "met": False, "ignore_sigint": True}])
+        proc = subprocess.Popen(
+            [sys.executable, str(WATCHDOG), "run", "--project", str(self.project), "--claude-bin", str(FAKE_CLAUDE), *FAST_FLAGS],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.time() + 10
+        while not self.calls() and time.time() < deadline:
+            time.sleep(0.05)
+        started = time.time()
+        (self.project / ".overnight" / "STOP").write_text("")
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, out + err)
+        self.assertEqual(self.state()["status"], "stopped")
+        self.assertLess(time.time() - started, 20)  # kill grace is 2 s in FAST_FLAGS, then SIGTERM
+        self.assertEqual(len(self.calls()), 2)
+
+
+class RunProcessTests(unittest.TestCase):
+    def test_timeout_kills_the_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            started = time.time()
+            code, out, err, killed = ow.run_process(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                Path(tmp), Path(tmp) / "logs" / "slow", 0.05, lambda: False, 0.5, 1.0,
+            )
+            self.assertTrue(killed)
+            self.assertNotEqual(code, 0)
+            self.assertLess(time.time() - started, 10)
+            self.assertTrue((Path(tmp) / "logs" / "slow.json").is_file())
+
 
 class StatusTests(ProcessTestCase):
     def test_status_after_done_run(self):

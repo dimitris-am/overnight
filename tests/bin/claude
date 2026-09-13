@@ -4,7 +4,7 @@
 Goal sessions (prompt starts with "/goal ") consume steps from the JSON list in
 $FAKE_CLAUDE_SCENARIO. Other prompts (wrap-up) exit 0 at once. Every invocation's
 argv is appended to $FAKE_CLAUDE_STATE/calls.jsonl.
-Step keys: sleep, exit, met (true/false/null), reason, result, stderr, commit, json.
+Step keys: sleep, exit, met (true/false/null), reason, result, stderr, commit, json, ignore_sigint.
 """
 import json
 import os
@@ -32,6 +32,8 @@ def main() -> None:
     counter.write_text(str(index + 1))
     steps = json.loads(Path(os.environ["FAKE_CLAUDE_SCENARIO"]).read_text())
     step = steps[min(index, len(steps) - 1)]
+    if step.get("ignore_sigint"):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     time.sleep(step.get("sleep", 0))
     session_id = step.get("session_id") or f"fake-{uuid.uuid4().hex[:8]}"
