@@ -9,6 +9,8 @@ BRIEF.md is the human's approval of the direction. Read it first.
 - writing-plans: always choose subagent-driven development.
 - subagent-driven-development and every other skill: work directly on `main` in this repository; no worktrees. Skip finishing-a-development-branch.
 - Pre-approved outside actions: {approved_actions}. Anything else that a skill would stop to ask about: log it as `needs-human` in JOURNAL.md, skip it, and continue with other work. Never force-push, spend money, or delete resources this run did not create.
+- Work only inside this project directory: never modify files outside it (your home directory, global git or shell configuration, other repositories) and never install tools globally.
+- Never write secrets (tokens, keys, passwords, or environment variable values) into JOURNAL.md, .overnight/evidence.md, commits, or logs; redact them in any command output you record.
 
 **Record keeping:**
 - JOURNAL.md: one line per event, `- HH:MM [decision|setback|milestone|needs-human] text`. Log every question you answered and every choice you made.

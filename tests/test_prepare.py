@@ -109,6 +109,24 @@ class PrepareTests(GitEnvMixin, unittest.TestCase):
         self.assertIn("- [ ] Try tally on a real file", journal)
         self.assertEqual(git(project, "status", "--porcelain"), "")
 
+    def test_rules_keep_work_inside_the_project_and_secrets_out_of_records(self):
+        project = self.base / "tally"
+        project.mkdir()
+        self.run_prepare(project)
+        claude_md = (project / "CLAUDE.md").read_text()
+        self.assertIn(
+            "- Work only inside this project directory: never modify files outside it (your home directory, global git or "
+            "shell configuration, other repositories) and never install tools globally.",
+            claude_md,
+        )
+        self.assertIn(
+            "- Never write secrets (tokens, keys, passwords, or environment variable values) into JOURNAL.md, "
+            ".overnight/evidence.md, commits, or logs; redact them in any command output you record.",
+            claude_md,
+        )
+        self.assertLess(claude_md.index("Pre-approved outside actions"), claude_md.index("Work only inside this project directory"))
+        self.assertLess(claude_md.index("Never write secrets"), claude_md.index("**Record keeping:**"))
+
     def test_prepare_ignores_ds_store_when_judging_empty(self):
         project = self.base / "tally"
         project.mkdir()
