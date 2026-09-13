@@ -469,6 +469,8 @@ class StatusReportTests(unittest.TestCase):
         self.write_live_transcript("old", "old", project, [{"met": True, "reason": "old run"}], mtime=now - 7200)
         self.write_live_transcript("live", "live", project, [{"met": False, "sentinel": True}, {"met": False, "reason": "evidence not printed"}], mtime=now - 60)
         self.write_live_transcript("other", "other", "/somewhere/else", [{"met": True, "reason": "other project"}], mtime=now - 5)
+        # the interactive session running /overnight:status in the same directory is the newest file, but has no goal
+        self.write_live_transcript("interactive", "interactive", project, [], mtime=now - 1)
         report = self.report()
         started = dt.datetime.fromisoformat("2026-09-17T20:05:00.123+00:00").astimezone()
         self.assertIn("live goal check: not met — evidence not printed", report)

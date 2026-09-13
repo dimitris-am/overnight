@@ -166,8 +166,10 @@ def transcript_head(transcript: Path, max_lines: int = 20) -> Tuple[Optional[str
     return cwd, timestamp
 
 
-def find_live_transcript(project: Path, since: float, config_dir: Path) -> Optional[Path]:
-    """Newest transcript modified since the run started whose session ran in the project."""
+def find_live_transcript(project: Path, since: float, config_dir: Path) -> Optional[Tuple[Path, Dict]]:
+    """Newest /goal session transcript modified since the run started whose session ran in the project,
+    with its latest goal_status. The interactive session that runs /overnight:status shares the project
+    directory and is usually the newest file; it has no goal_status, so it is skipped."""
     recent = []
     for name in glob.glob(str(config_dir / "projects" / "*" / "*.jsonl")):
         try:
@@ -177,8 +179,15 @@ def find_live_transcript(project: Path, since: float, config_dir: Path) -> Optio
         if modified >= since:
             recent.append((modified, name))
     for _, name in sorted(recent, reverse=True):
-        if transcript_head(Path(name))[0] == str(project):
-            return Path(name)
+        path = Path(name)
+        if transcript_head(path)[0] != str(project):
+            continue
+        try:
+            latest = latest_goal_status(path)
+        except OSError:
+            continue
+        if latest is not None:
+            return path, latest
     return None
 
 
@@ -578,9 +587,9 @@ def status_report(
     if status == "running" and state.get("run_started_epoch"):
         live = find_live_transcript(project, float(state["run_started_epoch"]), config_dir or claude_config_dir())
         if live is not None:
-            latest = latest_goal_status(live)
-            lines.append(f"live goal check: {_verdict_text(None if not latest or latest.get('sentinel') else latest)}")
-            lines.append(f"current session started: {_session_start_text(live)}")
+            transcript, latest = live
+            lines.append(f"live goal check: {_verdict_text(None if latest.get('sentinel') else latest)}")
+            lines.append(f"current session started: {_session_start_text(transcript)}")
     lines.append(f"commits since start: {commits}")
     if state.get("end_reason"):
         lines.append(f"end reason: {state['end_reason']}")
