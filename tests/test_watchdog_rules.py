@@ -1,0 +1,235 @@
+import datetime as dt
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from helpers import ROOT  # noqa: F401  (puts scripts/ on sys.path)
+
+import overnight_watchdog as ow
+
+START = dt.datetime(2026, 9, 17, 22, 0).timestamp()
+
+
+class FakeClock:
+    def __init__(self, t):
+        self.t = t
+        self.sleeps = []
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+class FakeRunner:
+    """Plays scripted sessions. Each step: session_id, duration, met, reason, commit, killed, text."""
+
+    def __init__(self, clock, steps, heads):
+        self.clock = clock
+        self.steps = list(steps)
+        self.heads = heads
+        self.calls = []
+        self.wrapups = []
+        self.outcomes = {}
+
+    def __call__(self, cmd, cwd, log_prefix, poll, should_stop, timeout, grace):
+        prompt = cmd[cmd.index("-p") + 1]
+        if not prompt.startswith("/goal "):
+            self.wrapups.append(cmd)
+            return 0, "{}", "", False
+        self.calls.append(cmd)
+        step = self.steps.pop(0)
+        self.clock.t += step.get("duration", 300)
+        if step.get("commit"):
+            self.heads["head"] = f"commit-{len(self.calls)}"
+        sid = step.get("session_id", f"s{len(self.calls)}")
+        self.outcomes[sid] = ow.SessionOutcome(sid, step.get("met", False), step.get("reason"), step.get("text", ""))
+        return step.get("exit", 0), json.dumps({"session_id": sid}), "", step.get("killed", False)
+
+
+class WatchdogTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self.tmp.name).resolve() / "proj"
+        (self.project / ".overnight").mkdir(parents=True)
+        self.write_config()
+        (self.project / ".overnight" / "goal.txt").write_text("Every done-criterion is proven.\n")
+        self.clock = FakeClock(START)
+        self.heads = {"head": "commit-0"}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_config(self, **overrides):
+        config = {"stop_time": "07:30", "model": "sonnet", "started_at_epoch": START, "max_relaunches": 10}
+        config.update(overrides)
+        (self.project / ".overnight" / "config.json").write_text(json.dumps(config))
+
+    def make(self, steps):
+        runner = FakeRunner(self.clock, steps, self.heads)
+        dog = ow.Watchdog(
+            self.project,
+            claude_bin="claude",
+            runner=runner,
+            clock=self.clock,
+            sleeper=self.clock.sleep,
+            interpreter=lambda out, err: runner.outcomes[json.loads(out)["session_id"]],
+            head=lambda project: self.heads["head"],
+        )
+        return dog, runner
+
+    def state(self):
+        return json.loads((self.project / ".overnight" / "state.json").read_text())
+
+
+class PureFunctionTests(unittest.TestCase):
+    def test_deadline_later_same_night_and_next_morning(self):
+        self.assertEqual(ow.compute_deadline("23:30", START), dt.datetime(2026, 9, 17, 23, 30).timestamp())
+        self.assertEqual(ow.compute_deadline("07:30", START), dt.datetime(2026, 9, 18, 7, 30).timestamp())
+
+    def test_usage_limit_wake(self):
+        settings = ow.Settings()
+        self.assertIsNone(ow.usage_limit_wake("all good", START, settings))
+        self.assertEqual(ow.usage_limit_wake("Claude usage limit reached.", START, settings), START + 1800)
+        three_am = dt.datetime(2026, 9, 18, 3, 0).timestamp()
+        self.assertEqual(ow.usage_limit_wake("Usage limit reached. Your limit resets 3am (Europe/Tirane)", START, settings), three_am + 120)
+        half_past_eleven = dt.datetime(2026, 9, 17, 23, 30).timestamp()
+        self.assertEqual(ow.usage_limit_wake("rate limit hit; resets at 23:30", START, settings), half_past_eleven + 120)
+        noon_next = dt.datetime(2026, 9, 18, 12, 0).timestamp()
+        self.assertEqual(ow.usage_limit_wake("limit reached, resets at 12pm", START, settings), noon_next + 120)
+
+    def test_goal_command_flags(self):
+        self.assertEqual(
+            ow.goal_command("claude", "G", None, None),
+            ["claude", "-p", "/goal G", "--permission-mode", "bypassPermissions", "--settings", '{"fastMode": false}', "--output-format", "json"],
+        )
+        cmd = ow.goal_command("claude", "G", "sonnet", "abc")
+        self.assertEqual(cmd[-4:], ["--model", "sonnet", "--resume", "abc"])
+
+    def test_wrapup_command_has_no_goal_and_no_resume(self):
+        cmd = ow.wrapup_command("claude", "stop time", "sonnet")
+        prompt = cmd[cmd.index("-p") + 1]
+        self.assertFalse(prompt.startswith("/goal"))
+        self.assertIn("reason: stop time", prompt)
+        self.assertNotIn("--resume", cmd)
+        self.assertIn('{"fastMode": false}', cmd)
+
+    def test_session_name_is_sanitized(self):
+        self.assertEqual(ow.session_name(Path("/tmp/agna.skills v2")), "overnight-agna-skills-v2")
+
+
+class TranscriptTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config_dir = Path(self.tmp.name)
+        (self.config_dir / "projects" / "p").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_transcript(self, sid, entries):
+        path = self.config_dir / "projects" / "p" / f"{sid}.jsonl"
+        path.write_text("".join(json.dumps(e) + "\n" for e in entries) + "not json\n")
+        return path
+
+    def test_last_goal_status_wins(self):
+        path = self.write_transcript("s1", [
+            {"type": "attachment", "attachment": {"type": "goal_status", "met": False, "sentinel": True}},
+            {"type": "user", "message": {}},
+            {"type": "attachment", "attachment": {"type": "goal_status", "met": True, "reason": "evidence shown"}},
+        ])
+        self.assertEqual(ow.last_goal_status(path), (True, "evidence shown"))
+
+    def test_no_goal_status(self):
+        path = self.write_transcript("s2", [{"type": "user"}])
+        self.assertEqual(ow.last_goal_status(path), (False, None))
+
+    def test_interpret_session_reads_transcript(self):
+        self.write_transcript("s3", [{"type": "attachment", "attachment": {"type": "goal_status", "met": True, "reason": "ok"}}])
+        outcome = ow.interpret_session(json.dumps({"session_id": "s3", "result": "done"}), "warn", self.config_dir)
+        self.assertEqual((outcome.session_id, outcome.met, outcome.reason), ("s3", True, "ok"))
+        self.assertIn("done", outcome.text)
+        self.assertIn("warn", outcome.text)
+
+    def test_interpret_session_handles_garbage(self):
+        outcome = ow.interpret_session("Traceback: boom", "", self.config_dir)
+        self.assertEqual((outcome.session_id, outcome.met), (None, False))
+        self.assertIn("boom", outcome.text)
+
+
+class LoopTests(WatchdogTestCase):
+    def test_met_on_first_session(self):
+        dog, runner = self.make([{"met": True}])
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(self.state()["status"], "done")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(runner.wrapups, [])
+
+    def test_resumes_previous_session_until_met(self):
+        dog, runner = self.make([{"commit": True}, {"commit": True}, {"met": True}])
+        self.assertEqual(dog.run(), 0)
+        self.assertNotIn("--resume", runner.calls[0])
+        self.assertEqual(runner.calls[1][-2:], ["--resume", "s1"])
+        self.assertEqual(runner.calls[2][-2:], ["--resume", "s2"])
+        self.assertEqual(self.state()["relaunches"], 2)
+
+    def test_three_fast_crashes_fail_the_run(self):
+        dog, runner = self.make([{"duration": 10}, {"duration": 10}, {"duration": 10}])
+        self.assertEqual(dog.run(), 1)
+        self.assertEqual(self.state()["status"], "failed")
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(len(runner.wrapups), 1)
+
+    def test_two_unproductive_resumes_switch_to_a_fresh_session(self):
+        dog, runner = self.make([{}, {}, {}, {"met": True}])
+        self.assertEqual(dog.run(), 0)
+        self.assertNotIn("--resume", runner.calls[0])
+        self.assertIn("--resume", runner.calls[1])
+        self.assertIn("--resume", runner.calls[2])
+        self.assertNotIn("--resume", runner.calls[3])
+
+    def test_relaunch_cap(self):
+        self.write_config(max_relaunches=2)
+        dog, runner = self.make([{"commit": True}, {"commit": True}, {"commit": True}])
+        self.assertEqual(dog.run(), 1)
+        self.assertEqual(self.state()["end_reason"], "relaunch cap reached")
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(len(runner.wrapups), 1)
+
+    def test_usage_limit_waits_and_does_not_count_as_crash(self):
+        dog, runner = self.make([{"duration": 5, "text": "Claude usage limit reached."}, {"met": True}])
+        self.assertEqual(dog.run(), 0)
+        self.assertGreaterEqual(sum(self.clock.sleeps), 1800)
+        self.assertEqual(self.state()["consecutive_fast_crashes"], 0)
+        self.assertEqual(runner.calls[1][-2:], ["--resume", "s1"])
+
+    def test_stop_time_ends_run_with_wrapup(self):
+        self.clock.t = dt.datetime(2026, 9, 18, 7, 29).timestamp()
+        dog, runner = self.make([{"duration": 120, "killed": True}])
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(self.state()["status"], "stopped")
+        self.assertEqual(self.state()["end_reason"], "stop time")
+        self.assertEqual(len(runner.wrapups), 1)
+
+    def test_stop_file_before_start(self):
+        (self.project / ".overnight" / "STOP").write_text("")
+        dog, runner = self.make([])
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(len(runner.wrapups), 1)
+        self.assertEqual(self.state()["end_reason"], "stop requested")
+
+    def test_state_records_verdicts(self):
+        dog, runner = self.make([{"commit": True, "reason": "tests not shown"}, {"met": True, "reason": "all proven"}])
+        dog.run()
+        state = self.state()
+        self.assertEqual(state["last_verdict"], {"met": True, "reason": "all proven"})
+        self.assertEqual([s["reason"] for s in state["sessions"]], ["tests not shown", "all proven"])
+        self.assertTrue(state["sessions"][0]["made_commit"])
+
+
+if __name__ == "__main__":
+    unittest.main()
