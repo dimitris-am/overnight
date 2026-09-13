@@ -36,7 +36,7 @@ Runs these steps in order and stops at the first failure with a specific message
 
 1. **Validate the brief** (section 4). Report every missing or unusable section at once. The brief may live anywhere; `start` copies it into the project root as `BRIEF.md`, so the project is self-contained, and records the source path in `.overnight/config.json`.
 2. **Check prerequisites:**
-   - the current directory is the project: a git repository with a clean working tree, or an empty directory (then `start` runs `git init`);
+   - the current directory is the project: the top level of its own git repository with a clean working tree, or an empty directory that is not inside another repository (then `start` runs `git init`);
    - the Superpowers plugin is installed and enabled;
    - `tmux` and `python3` (3.9+) are on `PATH`;
    - every CLI the brief's constraints or guardrails depend on is authenticated — detected from the brief (e.g., Cloudflare → `wrangler whoami`; GitHub → `gh auth status`);
@@ -129,14 +129,10 @@ BRIEF.md is the human's approval of the direction. Read it first.
 ### 6.1 Template
 
 ```
-Every done-criterion for this project is proven in this conversation:
-(1) <criterion 1>
-(2) <criterion 2>
-...
-Proven means: the most recent print of .overnight/evidence.md shows, for each numbered criterion, the command that was run and its actual output (not a claim), and JOURNAL.md has a final summary entry.
+Every done-criterion for this project is proven in this conversation: (1) <criterion 1>. (2) <criterion 2>. ... Proven means: the most recent print of .overnight/evidence.md shows, for each numbered criterion, the command that was run and its actual output (not a claim), and JOURNAL.md has a final summary entry.
 ```
 
-Criteria are copied from the brief (after any accepted rewording) and numbered. The condition is also the first prompt of the session, so it points Claude at the brief implicitly through `CLAUDE.md`, which every session loads.
+The condition is stored in `.overnight/goal.txt` as a single line, because slash-command arguments are passed on one line. Criteria are copied from the brief (after any accepted rewording) and numbered. The condition is also the first prompt of the session, so it points Claude at the brief implicitly through `CLAUDE.md`, which every session loads.
 
 ### 6.2 Provability review
 
@@ -197,8 +193,10 @@ overnight/
   skills/start/references/goal-condition.md       the section 6 template and provability review
   skills/status/SKILL.md
   skills/stop/SKILL.md
-  scripts/overnight_watchdog.py
-  tests/                                           watchdog tests with a fake claude
+  scripts/overnight_brief.py                       brief parsing and validation (section 4)
+  scripts/overnight_prepare.py                     project preparation and goal condition (sections 5-6)
+  scripts/overnight_watchdog.py                    run, launch (tmux), and status
+  tests/                                           unit tests, plus watchdog tests with a fake claude
   README.md
   docs/superpowers/specs/2026-09-13-overnight-plugin-design.md
 ```
