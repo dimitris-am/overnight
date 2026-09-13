@@ -36,15 +36,16 @@ Runs these steps in order and stops at the first failure with a specific message
 
 1. **Validate the brief** (section 4). Report every missing or unusable section at once. The brief may live anywhere; `start` copies it into the project root as `BRIEF.md`, so the project is self-contained, and records the source path in `.overnight/config.json`.
 2. **Check prerequisites:**
+   - no run is in progress here: if `.overnight/state.json` says `running` and `status` does not report `WATCHDOG NOT RESPONDING`, `start` stops with "a run is already in progress here; use /overnight:status or /overnight:stop" before any other check or change;
    - the current directory is the project: the top level of its own git repository with a clean working tree, or an empty directory that is not inside another repository (then `start` runs `git init`);
    - the Superpowers plugin is installed and enabled;
    - `tmux` and `python3` (3.9+) are on `PATH`;
    - every CLI the brief's constraints or guardrails depend on is authenticated — detected from the brief (e.g., Cloudflare → `wrangler whoami`; GitHub → `gh auth status`);
    - a stop time is known (from the brief or `--until`).
 3. **Review done-criteria for provability** (section 6.2). Where a criterion cannot be proven by command output in the transcript, propose an agent-provable rewording and ask the human to accept or edit it. This is the only interactive step, and it happens before launch.
-4. **Prepare the project** (section 5): write the unattended rules into `CLAUDE.md`, create `JOURNAL.md` and `.overnight/`, commit.
+4. **Prepare the project** (section 5): write the unattended rules into `CLAUDE.md`, create `JOURNAL.md` and `.overnight/`, remove a leftover `.overnight/STOP` from an earlier run, commit.
 5. **Write the goal condition** to `.overnight/goal.txt` (section 6).
-6. **Launch the watchdog** in a detached tmux session named `overnight-<directory-name>`, then print: the tmux attach command, `/overnight:status`, `/overnight:stop`, and the stop time. Before starting tmux, `launch` checks that the Claude binary exists (on `PATH`, or executable when given as a path) and fails with `claude binary not found: …` otherwise. When `caffeinate` is available (macOS), the whole watchdog runs under `caffeinate -i`, so the machine stays awake through sessions and usage-limit waits; elsewhere the command is unchanged. tmux execs `/bin/sh -c <command>` directly, so the user's login shell (fish, for example) never parses it. After tmux returns, `launch` waits up to 15 seconds for `.overnight/state.json` to show a `run_started_epoch` from this launch; if none appears, it captures the last 20 lines of the tmux pane, kills that session, and fails with that output instead of reporting success.
+6. **Launch the watchdog** in a detached tmux session named `overnight-<directory-name>`, then print: the tmux attach command, `/overnight:status`, `/overnight:stop`, and the stop time. If that tmux session already exists, `launch` fails with `a run is already in progress in <name>` when `state.json` says `running` and its `watchdog_pid` is alive; otherwise the session is left over from a finished run, and `launch` kills it and continues. Before starting tmux, `launch` checks that the Claude binary exists (on `PATH`, or executable when given as a path) and fails with `claude binary not found: …` otherwise. When `caffeinate` is available (macOS), the whole watchdog runs under `caffeinate -i`, so the machine stays awake through sessions and usage-limit waits; elsewhere the command is unchanged. tmux execs `/bin/sh -c <command>` directly, so the user's login shell (fish, for example) never parses it. After tmux returns, `launch` waits up to 15 seconds for `.overnight/state.json` to show a `run_started_epoch` from this launch; if none appears, it captures the last 20 lines of the tmux pane, kills that session, and fails with that output instead of reporting success.
 
 `--model` defaults to the user's configured model. Fast mode is always forced off for the run.
 
@@ -120,7 +121,7 @@ BRIEF.md is the human's approval of the direction. Read it first.
 | `.overnight/evidence.md` | Claude | yes |
 | `.overnight/state.json` | watchdog | no (gitignored) |
 | `.overnight/logs/` — watchdog log, one JSON result per session | watchdog | no (gitignored) |
-| `.overnight/STOP` | stop command | no (gitignored) |
+| `.overnight/STOP` | stop command (removed by start before a new run) | no (gitignored) |
 
 `start` adds the three gitignore entries.
 

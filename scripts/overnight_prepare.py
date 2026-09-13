@@ -152,6 +152,9 @@ def prepare(
 
     overnight_dir = project / ".overnight"
     overnight_dir.mkdir(exist_ok=True)
+    stop_file = overnight_dir / "STOP"  # left by /overnight:stop on an earlier run; would stop the new one at once
+    if stop_file.exists():
+        stop_file.unlink()
     goal_file = overnight_dir / "goal.txt"
     goal_file.write_text(goal + "\n", encoding="utf-8")
     config_file = overnight_dir / "config.json"

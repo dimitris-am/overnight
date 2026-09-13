@@ -198,9 +198,27 @@ class LaunchTests(ProcessTestCase):
                     break
                 time.sleep(0.5)
             self.assertEqual(self.state()["status"], "done")
+            # The finished run's shell keeps the session open; a new launch replaces that stale session.
+            self.assertEqual(subprocess.run(["tmux", "has-session", "-t", f"={name}"], capture_output=True).returncode, 0)
+            first_start = self.state()["run_started_epoch"]
             again = self.watchdog("launch", "--project", str(self.project), "--claude-bin", str(FAKE_CLAUDE))
-            self.assertEqual(again.returncode, 1)
-            self.assertIn("already exists", again.stdout + again.stderr)
+            self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertIn(name, again.stdout)
+            self.assertGreater(self.state()["run_started_epoch"], first_start)
+        finally:
+            subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+
+    def test_launch_refuses_while_a_run_is_in_progress(self):
+        name = ow.session_name(self.project)
+        (self.project / ".overnight" / "state.json").write_text(json.dumps({
+            "status": "running", "watchdog_pid": os.getpid(), "heartbeat_epoch": time.time(), "run_started_epoch": time.time(),
+        }))
+        subprocess.run(["tmux", "new-session", "-d", "-s", name, "sleep", "600"], check=True, env=ow.clean_env())
+        try:
+            result = self.watchdog("launch", "--project", str(self.project), "--claude-bin", str(FAKE_CLAUDE))
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(f"a run is already in progress in {name}", result.stdout)
+            self.assertEqual(subprocess.run(["tmux", "has-session", "-t", f"={name}"], capture_output=True).returncode, 0)
         finally:
             subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
 

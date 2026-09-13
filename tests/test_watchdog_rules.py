@@ -340,6 +340,25 @@ class CrashAndHeartbeatTests(WatchdogTestCase):
         self.assertGreaterEqual(max(beats), START + 1500)
 
 
+class RunInProgressTests(unittest.TestCase):
+    def test_only_a_running_state_with_a_live_pid_is_in_progress(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".overnight").mkdir()
+            self.assertFalse(ow.run_in_progress(project))  # no state.json
+            cases = [
+                ({"status": "running", "watchdog_pid": os.getpid()}, True),
+                ({"status": "running", "watchdog_pid": child.pid}, False),
+                ({"status": "done", "watchdog_pid": os.getpid()}, False),
+                ({"status": "running"}, False),
+            ]
+            for state, expected in cases:
+                (project / ".overnight" / "state.json").write_text(json.dumps(state))
+                self.assertEqual(ow.run_in_progress(project), expected, state)
+
+
 class StatusReportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

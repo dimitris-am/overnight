@@ -455,6 +455,14 @@ def _pid_alive(pid: object) -> bool:
     return True
 
 
+def run_in_progress(project: Path) -> bool:
+    try:
+        state = json.loads((Path(project) / ".overnight" / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(state, dict) and state.get("status") == "running" and _pid_alive(state.get("watchdog_pid"))
+
+
 def watchdog_responding(state: Dict, now: float) -> bool:
     heartbeat = state.get("heartbeat_epoch")
     if heartbeat is None or not _pid_alive(state.get("watchdog_pid")):
@@ -557,8 +565,11 @@ def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
         raise LaunchError(f"claude binary not found: {claude_bin}")
     name = session_name(project)
     if _tmux_alive(name):
-        raise LaunchError(f"tmux session {name} already exists")
-    inner = watchdog_shell_command(project, claude_bin, shutil.which("caffeinate"))
+        if run_in_progress(project):
+            raise LaunchError(f"a run is already in progress in {name}")
+        # A finished run leaves its shell open in the session; replace it.
+        subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+    inner =watchdog_shell_command(project, claude_bin, shutil.which("caffeinate"))
     cmd = tmux_new_session_command(name, project, tmux_env_args(forward_env), inner)
     launched_at = time.time()
     # A tmux server started by this call captures its environment: keep the parent session out of it.

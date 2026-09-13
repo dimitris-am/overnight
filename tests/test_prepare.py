@@ -124,6 +124,15 @@ class PrepareTests(GitEnvMixin, unittest.TestCase):
         self.assertEqual((project / "CLAUDE.md").read_text().count(op.BEGIN), 1)
         self.assertIn("[milestone] Unattended run restarted; stop time 06:00.", (project / "JOURNAL.md").read_text())
 
+    def test_rerun_removes_a_leftover_stop_file(self):
+        project = self.base / "tally"
+        project.mkdir()
+        self.run_prepare(project)
+        (project / ".overnight" / "STOP").write_text("")
+        self.run_prepare(project, now=1789003600.0)
+        self.assertFalse((project / ".overnight" / "STOP").exists())
+        self.assertEqual(git(project, "status", "--porcelain"), "")
+
     def test_refuses_dirty_repository(self):
         project = self.base / "tally"
         project.mkdir()

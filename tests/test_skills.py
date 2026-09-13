@@ -22,6 +22,12 @@ class SkillFileTests(unittest.TestCase):
         for needle in ('overnight_brief.py" validate', 'overnight_prepare.py" --project', 'overnight_watchdog.py" launch', "references/goal-condition.md", "AskUserQuestion"):
             self.assertIn(needle, text)
 
+    def test_start_refuses_a_run_already_in_progress_before_changing_anything(self):
+        _, _, text = self.frontmatter("start")
+        check = text.index("a run is already in progress here; use /overnight:status or /overnight:stop")
+        self.assertIn("WATCHDOG NOT RESPONDING", text)
+        self.assertLess(check, text.index("## 3."))
+
     def test_status_judges_attention_by_watchdog_health_not_tmux(self):
         _, _, text = self.frontmatter("status")
         self.assertIn("WATCHDOG NOT RESPONDING", text)

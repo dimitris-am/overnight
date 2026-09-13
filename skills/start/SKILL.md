@@ -19,7 +19,9 @@ Run `python3 "$SCRIPTS/overnight_brief.py" validate "<brief-path>" [--until HH:M
 
 ## 2. Check prerequisites
 
-Run all checks, then report every failure together and stop if any failed.
+First, before any other check or change: if `.overnight/state.json` exists with `"status": "running"`, run `python3 "$SCRIPTS/overnight_watchdog.py" status --project "$PWD"`. Unless its status line says `WATCHDOG NOT RESPONDING`, stop with: "a run is already in progress here; use /overnight:status or /overnight:stop".
+
+Then run all of these checks, report every failure together, and stop if any failed.
 
 - **Project directory:** `git rev-parse --show-toplevel` must equal the current directory with a clean `git status --porcelain`, **or** the directory must be empty (ignoring `.DS_Store`) and not inside another repository.
 - **Superpowers:** `claude plugin list` shows a `superpowers@…` entry with status enabled.
