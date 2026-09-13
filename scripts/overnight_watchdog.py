@@ -3,11 +3,15 @@
 the stop time arrives, or the run fails."""
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import glob
 import json
 import os
 import re
+import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -315,5 +319,160 @@ class Watchdog:
             handle.write(line + "\n")
 
 
+def _terminate(proc: subprocess.Popen, kill_grace: float) -> None:
+    for sig, wait_seconds in ((signal.SIGINT, kill_grace), (signal.SIGTERM, 10.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=wait_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def run_process(cmd, cwd, log_prefix, poll_seconds, should_stop, timeout, kill_grace):
-    raise NotImplementedError("run_process is implemented in Task 5")
+    log_prefix = Path(log_prefix)
+    log_prefix.parent.mkdir(parents=True, exist_ok=True)
+    out_path = log_prefix.parent / f"{log_prefix.name}.json"
+    err_path = log_prefix.parent / f"{log_prefix.name}.stderr"
+    killed = False
+    with out_path.open("w", encoding="utf-8") as out, err_path.open("w", encoding="utf-8") as err:
+        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err, start_new_session=True)
+        started = time.time()
+        while proc.poll() is None:
+            if should_stop() or (timeout is not None and time.time() - started > timeout):
+                killed = True
+                _terminate(proc, kill_grace)
+                break
+            time.sleep(poll_seconds)
+        exit_code = proc.wait()
+    return exit_code, out_path.read_text(encoding="utf-8"), err_path.read_text(encoding="utf-8"), killed
+
+
+def _tmux_alive(name: str) -> bool:
+    if shutil.which("tmux") is None:
+        return False
+    return subprocess.run(["tmux", "has-session", "-t", f"={name}"], capture_output=True).returncode == 0
+
+
+def status_report(project: Path) -> str:
+    project = Path(project).resolve()
+    overnight = project / ".overnight"
+    config_file = overnight / "config.json"
+    if not config_file.exists():
+        return f"No overnight run in {project}."
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    state_file = overnight / "state.json"
+    state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+    name = session_name(project)
+    verdict = state.get("last_verdict")
+    if verdict is None:
+        verdict_text = "none yet"
+    else:
+        verdict_text = ("met" if verdict.get("met") else "not met") + " — " + (verdict.get("reason") or "no reason given")[:300]
+    commits = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD", f"--since={config.get('started_at', '')}"],
+        cwd=str(project), capture_output=True, text=True,
+    ).stdout.strip() or "0"
+    lines = [
+        f"overnight run: {project.name}",
+        f"status: {state.get('status', 'not started')}",
+        f"started: {config.get('started_at', '?')}  stop time: {config.get('stop_time', '?')}",
+        f"tmux session: {name} ({'alive' if _tmux_alive(name) else 'not running'})",
+        f"sessions: {len(state.get('sessions', []))}  relaunches: {state.get('relaunches', 0)}",
+        f"last goal check: {verdict_text}",
+        f"commits since start: {commits}",
+    ]
+    if state.get("end_reason"):
+        lines.append(f"end reason: {state['end_reason']}")
+    journal = project / "JOURNAL.md"
+    if journal.exists():
+        tail = journal.read_text(encoding="utf-8").splitlines()[-15:]
+        lines += ["", "JOURNAL.md (last 15 lines):"] + tail
+    return "\n".join(lines)
+
+
+class LaunchError(Exception):
+    pass
+
+
+def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
+    project = Path(project).resolve()
+    if shutil.which("tmux") is None:
+        raise LaunchError("tmux is not installed")
+    if not (project / ".overnight" / "config.json").exists():
+        raise LaunchError(f"No overnight run prepared in {project}; run /overnight:start first")
+    name = session_name(project)
+    if _tmux_alive(name):
+        raise LaunchError(f"tmux session {name} already exists")
+    script = Path(__file__).resolve()
+    inner = (
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} run "
+        f"--project {shlex.quote(str(project))} --claude-bin {shlex.quote(claude_bin)}; "
+        "echo '[overnight] watchdog exited'; exec \"${SHELL:-/bin/sh}\""
+    )
+    cmd = ["tmux", "new-session", "-d", "-s", name, "-c", str(project)]
+    for var in forward_env:
+        if var in os.environ:
+            cmd += ["-e", f"{var}={os.environ[var]}"]
+    cmd.append(inner)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise LaunchError(f"tmux failed: {result.stderr.strip()}")
+    return name
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="overnight_watchdog")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = sub.add_parser("run", help="run the watchdog loop in the foreground")
+    run_parser.add_argument("--project", required=True)
+    run_parser.add_argument("--claude-bin", default="claude")
+    run_parser.add_argument("--poll", type=float, default=Settings.poll_seconds)
+    run_parser.add_argument("--relaunch-delay", type=float, default=Settings.relaunch_delay_seconds)
+    run_parser.add_argument("--fast-crash-seconds", type=float, default=Settings.fast_crash_seconds)
+    run_parser.add_argument("--kill-grace", type=float, default=Settings.kill_grace_seconds)
+    run_parser.add_argument("--wrapup-timeout", type=float, default=Settings.wrapup_timeout_seconds)
+    run_parser.add_argument("--limit-fallback-seconds", type=float, default=Settings.limit_fallback_seconds)
+
+    launch_parser = sub.add_parser("launch", help="start the watchdog in a detached tmux session")
+    launch_parser.add_argument("--project", required=True)
+    launch_parser.add_argument("--claude-bin", default="claude")
+
+    status_parser = sub.add_parser("status", help="print the run status")
+    status_parser.add_argument("--project", required=True)
+
+    args = parser.parse_args(argv)
+    if args.command == "run":
+        settings = Settings(
+            poll_seconds=args.poll,
+            relaunch_delay_seconds=args.relaunch_delay,
+            fast_crash_seconds=args.fast_crash_seconds,
+            kill_grace_seconds=args.kill_grace,
+            wrapup_timeout_seconds=args.wrapup_timeout,
+            limit_fallback_seconds=args.limit_fallback_seconds,
+        )
+        return Watchdog(Path(args.project), claude_bin=args.claude_bin, settings=settings).run()
+    if args.command == "launch":
+        forward = ["PATH", "CLAUDE_CONFIG_DIR"] + [v for v in os.environ.get("OVERNIGHT_FORWARD_ENV", "").split(",") if v]
+        try:
+            name = launch(Path(args.project), args.claude_bin, forward)
+        except LaunchError as error:
+            print(f"error: {error}")
+            return 1
+        print(name)
+        return 0
+    report = status_report(Path(args.project))
+    print(report)
+    return 1 if report.startswith("No overnight run") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

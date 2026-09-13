@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Fake `claude` for overnight tests.
+
+Goal sessions (prompt starts with "/goal ") consume steps from the JSON list in
+$FAKE_CLAUDE_SCENARIO. Other prompts (wrap-up) exit 0 at once. Every invocation's
+argv is appended to $FAKE_CLAUDE_STATE/calls.jsonl.
+Step keys: sleep, exit, met (true/false/null), reason, result, stderr, commit, json.
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+
+def main() -> None:
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+    state = Path(os.environ["FAKE_CLAUDE_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "calls.jsonl").open("a") as handle:
+        handle.write(json.dumps(sys.argv[1:]) + "\n")
+    prompt = sys.argv[sys.argv.index("-p") + 1] if "-p" in sys.argv else ""
+    if not prompt.startswith("/goal "):
+        print(json.dumps({"type": "result", "session_id": "wrapup", "result": "wrap-up done", "is_error": False}))
+        sys.exit(0)
+
+    counter = state / "goal_count"
+    index = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(index + 1))
+    steps = json.loads(Path(os.environ["FAKE_CLAUDE_SCENARIO"]).read_text())
+    step = steps[min(index, len(steps) - 1)]
+
+    time.sleep(step.get("sleep", 0))
+    session_id = step.get("session_id") or f"fake-{uuid.uuid4().hex[:8]}"
+    if step.get("commit"):
+        Path(f"work-{index}.txt").write_text("work\n")
+        subprocess.run(["git", "add", "-A"], check=True)
+        subprocess.run(["git", "commit", "-q", "-m", f"work {index}"], check=True)
+    if step.get("met") is not None:
+        folder = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "fake"
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / f"{session_id}.jsonl").open("w") as handle:
+            handle.write(json.dumps({"type": "attachment", "attachment": {"type": "goal_status", "met": False, "sentinel": True}}) + "\n")
+            handle.write(json.dumps({"type": "attachment", "attachment": {"type": "goal_status", "met": step["met"], "reason": step.get("reason", "fake verdict")}}) + "\n")
+    if step.get("json", True):
+        print(json.dumps({"type": "result", "session_id": session_id, "result": step.get("result", "ok"), "is_error": step.get("exit", 0) != 0}))
+    sys.stderr.write(step.get("stderr", ""))
+    sys.exit(step.get("exit", 0))
+
+
+if __name__ == "__main__":
+    main()
