@@ -153,6 +153,12 @@ class PureFunctionTests(unittest.TestCase):
         self.assertTrue(awake.startswith("/usr/bin/caffeinate -i " + watchdog + "; "), awake)
         self.assertEqual(shlex.split(awake)[:4], ["/usr/bin/caffeinate", "-i", sys.executable, script])
 
+    def test_tmux_command_execs_posix_sh_directly(self):
+        inner = ow.watchdog_shell_command(Path("/tmp/p"), "claude", "/usr/bin/caffeinate")
+        cmd = ow.tmux_new_session_command("overnight-p", Path("/tmp/p"), ["-e", "PATH=/bin"], inner)
+        self.assertEqual(cmd, ["tmux", "new-session", "-d", "-s", "overnight-p", "-c", "/tmp/p", "-e", "PATH=/bin", "/bin/sh", "-c", inner])
+        self.assertEqual(subprocess.run(["/bin/sh", "-n", "-c", inner]).returncode, 0)
+
     def test_tmux_env_args_never_forward_parent_session_vars(self):
         environ = {"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "secret", "FOO": "bar"}
         self.assertEqual(

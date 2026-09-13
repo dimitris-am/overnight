@@ -40,6 +40,7 @@ WRAPUP_PROMPT = (
 
 STALE_HEARTBEAT_SECONDS = 300.0
 FINISHED_STATUSES = ("done", "stopped", "failed")
+LAUNCH_START_TIMEOUT_SECONDS = 15.0
 
 Runner = Callable[[List[str], Path, Path, float, Callable[[], bool], Optional[float], float], Tuple[int, str, str, bool]]
 
@@ -541,6 +542,11 @@ def watchdog_shell_command(project: Path, claude_bin: str, caffeinate_path: Opti
     return f"{watchdog}; echo '[overnight] watchdog exited'; exec \"${{SHELL:-/bin/sh}}\""
 
 
+def tmux_new_session_command(name: str, project: Path, env_args: List[str], inner: str) -> List[str]:
+    # With more than one command argument tmux execs it directly, so the user's shell (fish, ...) never parses `inner`.
+    return ["tmux", "new-session", "-d", "-s", name, "-c", str(project), *env_args, "/bin/sh", "-c", inner]
+
+
 def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
     project = Path(project).resolve()
     if shutil.which("tmux") is None:
@@ -553,13 +559,37 @@ def launch(project: Path, claude_bin: str, forward_env: List[str]) -> str:
     if _tmux_alive(name):
         raise LaunchError(f"tmux session {name} already exists")
     inner = watchdog_shell_command(project, claude_bin, shutil.which("caffeinate"))
-    cmd = ["tmux", "new-session", "-d", "-s", name, "-c", str(project)] + tmux_env_args(forward_env)
-    cmd.append(inner)
+    cmd = tmux_new_session_command(name, project, tmux_env_args(forward_env), inner)
+    launched_at = time.time()
     # A tmux server started by this call captures its environment: keep the parent session out of it.
     result = subprocess.run(cmd, capture_output=True, text=True, env=clean_env())
     if result.returncode != 0:
         raise LaunchError(f"tmux failed: {result.stderr.strip()}")
+    timeout = LAUNCH_START_TIMEOUT_SECONDS
+    if not _wait_for_watchdog_start(project / ".overnight" / "state.json", launched_at - 1.0, timeout):
+        pane = subprocess.run(["tmux", "capture-pane", "-p", "-t", f"={name}:"], capture_output=True, text=True).stdout
+        subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+        tail = "\n".join(pane.rstrip().splitlines()[-20:]) or "(no output)"
+        raise LaunchError(f"the watchdog did not start within {timeout:g} s; tmux session {name} removed. Last output:\n{tail}")
     return name
+
+
+def _watchdog_started(state_file: Path, since: float) -> bool:
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    started = state.get("run_started_epoch") if isinstance(state, dict) else None
+    return isinstance(started, (int, float)) and started >= since
+
+
+def _wait_for_watchdog_start(state_file: Path, since: float, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while not _watchdog_started(state_file, since):
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.25)
+    return True
 
 
 def main(argv: Optional[List[str]] = None) -> int:

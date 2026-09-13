@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import FAKE_CLAUDE, GIT_ENV, SCRIPTS, git
 
@@ -201,7 +202,40 @@ class LaunchTests(ProcessTestCase):
             self.assertEqual(again.returncode, 1)
             self.assertIn("already exists", again.stdout + again.stderr)
         finally:
-            subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+            subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+
+    def test_launch_does_not_depend_on_the_users_shell(self):
+        # A login shell that cannot run the command (fish, or here /usr/bin/false) must not matter.
+        self.set_scenario([{"met": True}])
+        self.env["SHELL"] = "/usr/bin/false"
+        self.env["OVERNIGHT_FORWARD_ENV"] = "FAKE_CLAUDE_STATE,FAKE_CLAUDE_SCENARIO,GIT_AUTHOR_NAME,GIT_AUTHOR_EMAIL,GIT_COMMITTER_NAME,GIT_COMMITTER_EMAIL"
+        name = ow.session_name(self.project)
+        try:
+            result = self.watchdog("launch", "--project", str(self.project), "--claude-bin", str(FAKE_CLAUDE))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                state_file = self.project / ".overnight" / "state.json"
+                if state_file.exists() and json.loads(state_file.read_text())["status"] == "done":
+                    break
+                time.sleep(0.25)
+            self.assertTrue((self.project / ".overnight" / "state.json").exists(), "watchdog never ran")
+            self.assertEqual(self.state()["status"], "done")
+        finally:
+            subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+
+    def test_launch_fails_when_the_watchdog_cannot_start(self):
+        (self.project / ".overnight" / "config.json").write_text("{not json")
+        name = ow.session_name(self.project)
+        try:
+            with mock.patch.object(ow, "LAUNCH_START_TIMEOUT_SECONDS", 3.0, create=True):
+                with self.assertRaises(ow.LaunchError) as caught:
+                    ow.launch(self.project, str(FAKE_CLAUDE), ["PATH"])
+            self.assertIn("did not start", str(caught.exception))
+            self.assertIn("[overnight] watchdog exited", str(caught.exception))
+            self.assertNotEqual(subprocess.run(["tmux", "has-session", "-t", f"={name}"], capture_output=True).returncode, 0)
+        finally:
+            subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
 
     def test_launch_refuses_a_missing_or_non_executable_claude_binary(self):
         not_executable = self.project.parent / "claude-not-executable"
