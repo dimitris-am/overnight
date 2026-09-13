@@ -277,6 +277,28 @@ class LoopTests(WatchdogTestCase):
         self.assertLess(sum(self.clock.sleeps), 1800)
         self.assertEqual(self.clock.sleeps, [ow.Settings().relaunch_delay_seconds])
 
+    def test_usage_limit_wait_past_the_stop_time_ends_at_the_stop_time(self):
+        deadline = dt.datetime(2026, 9, 18, 7, 30).timestamp()
+        dog, runner = self.make([{"duration": 5, "text": "Usage limit reached. Your limit resets 9am"}])
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(self.clock.t, deadline)  # slept until the stop time, not until 09:02
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(self.state()["status"], "stopped")
+        self.assertEqual(self.state()["end_reason"], "stop time")
+        self.assertEqual(len(runner.wrapups), 1)
+
+    def test_session_without_json_resumes_the_last_known_session(self):
+        dog, runner = self.make([
+            {"session_id": "s1", "commit": True},
+            {"session_id": None, "stdout": "Traceback: crashed before any JSON"},
+            {"met": True},
+        ])
+        dog.interpreter = lambda out, err: runner.outcomes[json.loads(out)["session_id"] if out.startswith("{") else None]
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(runner.calls[1][-2:], ["--resume", "s1"])
+        self.assertIsNone(self.state()["sessions"][1]["session_id"])
+        self.assertEqual(runner.calls[2][-2:], ["--resume", "s1"])  # the id-less session did not break the resume chain
+
     def test_stop_time_ends_run_with_wrapup(self):
         self.clock.t = dt.datetime(2026, 9, 18, 7, 29).timestamp()
         dog, runner = self.make([{"duration": 120, "killed": True}])

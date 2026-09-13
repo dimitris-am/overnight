@@ -34,6 +34,11 @@ class SkillFileTests(unittest.TestCase):
         self.assertIn("`failed`", text)
         self.assertNotIn("while the tmux session is not alive", text)
 
+    def test_stop_takes_the_tmux_session_name_from_status(self):
+        _, _, text = self.frontmatter("stop")
+        self.assertNotIn("overnight-<directory name>", text)
+        self.assertIn("`tmux session:`", text)
+
     def test_references_exist(self):
         for ref in ("brief-contract.md", "goal-condition.md", "unattended-rules.md"):
             self.assertTrue((ROOT / "skills" / "start" / "references" / ref).is_file(), ref)

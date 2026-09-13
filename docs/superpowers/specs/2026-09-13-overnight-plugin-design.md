@@ -62,7 +62,7 @@ Prints, from `.overnight/state.json`, the transcripts, git, and tmux:
 
 ### 3.3 `/overnight:stop`
 
-Creates `.overnight/STOP`. The watchdog sees it within its poll interval, ends the working session, and runs the wrap-up (section 7.4). Prints the tmux attach command for watching the wrap-up.
+Creates `.overnight/STOP`. The watchdog sees it within its poll interval, ends the working session, and runs the wrap-up (section 7.4). Prints the `status` output and the tmux attach command for watching the wrap-up, using the session name from the status output's `tmux session:` line.
 
 ## 4. Brief contract
 
@@ -122,11 +122,11 @@ BRIEF.md is the human's approval of the direction. Read it first.
 | `.overnight/goal.txt` | start | yes |
 | `.overnight/config.json` — brief path, stop time, model, start time, relaunch cap | start | yes |
 | `.overnight/evidence.md` | Claude | yes |
-| `.overnight/state.json` | watchdog | no (gitignored) |
+| `.overnight/state.json` (and `state.json.tmp` while it is being replaced) | watchdog | no (gitignored) |
 | `.overnight/logs/` — watchdog log, one JSON result per session | watchdog | no (gitignored) |
 | `.overnight/STOP` | stop command (removed by start before a new run) | no (gitignored) |
 
-`start` adds the three gitignore entries.
+`start` adds the four gitignore entries: `.overnight/state.json`, `.overnight/state.json.tmp`, `.overnight/logs/`, and `.overnight/STOP`.
 
 ## 6. The goal condition
 

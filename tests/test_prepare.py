@@ -127,6 +127,15 @@ class PrepareTests(GitEnvMixin, unittest.TestCase):
         self.assertLess(claude_md.index("Pre-approved outside actions"), claude_md.index("Work only inside this project directory"))
         self.assertLess(claude_md.index("Never write secrets"), claude_md.index("**Record keeping:**"))
 
+    def test_gitignore_covers_every_watchdog_file(self):
+        self.assertEqual(op.GITIGNORE_ENTRIES, [".overnight/state.json", ".overnight/state.json.tmp", ".overnight/logs/", ".overnight/STOP"])
+        project = self.base / "tally"
+        project.mkdir()
+        self.run_prepare(project)
+        self.assertIn(".overnight/state.json.tmp", (project / ".gitignore").read_text().splitlines())
+        (project / ".overnight" / "state.json.tmp").write_text("{}")
+        self.assertEqual(git(project, "status", "--porcelain"), "")
+
     def test_prepare_ignores_ds_store_when_judging_empty(self):
         project = self.base / "tally"
         project.mkdir()
