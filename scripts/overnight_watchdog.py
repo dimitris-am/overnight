@@ -30,7 +30,7 @@ PARENT_SESSION_ENV_VARS = frozenset({
     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_BRIDGE_SESSION_ID",
     "AI_AGENT", "TRACEPARENT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_CLIENT_APP",
 })
-LIMIT_RE = re.compile(r"(usage|rate)[ -]limit|limit (reached|resets)|hit your limit", re.IGNORECASE)
+LIMIT_RE = re.compile(r"(usage|rate|session)[ -]limit|limit\W*(reached|resets)|hit your limit", re.IGNORECASE)
 RESET_RE = re.compile(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
 LIMIT_EPOCH_RE = re.compile(r"limit reached\|(\d{9,11})", re.IGNORECASE)  # "Claude AI usage limit reached|<reset epoch>"
 WRAPUP_PROMPT = (

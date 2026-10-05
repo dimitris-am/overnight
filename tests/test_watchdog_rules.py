@@ -111,6 +111,13 @@ class PureFunctionTests(unittest.TestCase):
         reset_epoch = int(START) + 5400
         self.assertEqual(ow.usage_limit_wake(f"Claude AI usage limit reached|{reset_epoch}", START, settings), reset_epoch + 120)
 
+    def test_usage_limit_wake_recognizes_the_session_limit_message(self):
+        # The message a claude -p session returned on 2026-10-05; the watchdog counted it as a crash.
+        now = dt.datetime(2026, 10, 5, 19, 29).timestamp()
+        reset = dt.datetime(2026, 10, 5, 19, 50).timestamp()
+        text = "You've hit your session limit \u00b7 resets 7:50pm (Europe/Athens)"
+        self.assertEqual(ow.usage_limit_wake(text, now, ow.Settings()), reset + 120)
+
     def test_goal_command_flags(self):
         self.assertEqual(
             ow.goal_command("claude", "G", None, None),
@@ -260,6 +267,18 @@ class LoopTests(WatchdogTestCase):
         self.assertGreaterEqual(sum(self.clock.sleeps), 1800)
         self.assertEqual(self.state()["consecutive_fast_crashes"], 0)
         self.assertEqual(runner.calls[1][-2:], ["--resume", "s1"])
+
+    def test_session_limit_exits_wait_instead_of_counting_as_crashes(self):
+        # Three fast exits with this message failed a real run on 2026-10-05.
+        steps = [
+            {"duration": 15, "text": f"You've hit your session limit \u00b7 resets {t} (Europe/Athens)"}
+            for t in ("10:30pm", "11pm", "11:30pm")
+        ]
+        dog, runner = self.make(steps + [{"met": True}])
+        self.assertEqual(dog.run(), 0)
+        self.assertEqual(self.state()["status"], "done")
+        self.assertEqual(self.state()["consecutive_fast_crashes"], 0)
+        self.assertEqual(len(runner.calls), 4)
 
     def test_normal_result_mentioning_rate_limiting_does_not_wait(self):
         config_dir = Path(self.tmp.name).resolve() / "claude-config"
